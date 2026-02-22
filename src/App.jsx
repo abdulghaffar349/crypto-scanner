@@ -1,0 +1,763 @@
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+
+// ─── Token Config ───────────────────────────────────────────────
+const DEFAULT_TOKENS = [
+  { symbol: "BTCUSDT", name: "Bitcoin", role: "benchmark", narrative: [] },
+  { symbol: "ETHUSDT", name: "Ethereum", role: "alt", narrative: ["Infra", "L1"] },
+  { symbol: "SOLUSDT", name: "Solana", role: "alt", narrative: ["L1"] },
+  { symbol: "LINKUSDT", name: "Chainlink", role: "alt", narrative: ["Oracle", "RWA"] },
+  { symbol: "AVAXUSDT", name: "Avalanche", role: "alt", narrative: ["L1"] },
+  { symbol: "UNIUSDT", name: "Uniswap", role: "alt", narrative: ["DeFi"] },
+  { symbol: "AAVEUSDT", name: "Aave", role: "alt", narrative: ["DeFi"] },
+  { symbol: "ONDOUSDT", name: "Ondo", role: "alt", narrative: ["RWA"] },
+  { symbol: "TAOUSDT", name: "Bittensor", role: "alt", narrative: ["AI"] },
+  { symbol: "RENDERUSDT", name: "Render", role: "alt", narrative: ["AI", "Infra"] },
+  { symbol: "INJUSDT", name: "Injective", role: "alt", narrative: ["DeFi"] },
+  { symbol: "SUIUSDT", name: "Sui", role: "alt", narrative: ["L1"] },
+  { symbol: "NEARUSDT", name: "NEAR", role: "alt", narrative: ["AI", "L1"] },
+  { symbol: "FETUSDT", name: "Fetch.ai", role: "alt", narrative: ["AI"] },
+  { symbol: "APTUSDT", name: "Aptos", role: "alt", narrative: ["L1"] },
+];
+
+const NARRATIVE_COLORS = {
+  AI: "#a78bfa", RWA: "#f472b6", DeFi: "#34d399",
+  L1: "#60a5fa", Oracle: "#fbbf24", Infra: "#fb923c",
+};
+
+// ─── Technical Analysis Functions ────────────────────────────────
+function calcRSI(closes, period = 14) {
+  if (closes.length < period + 1) return null;
+  let gains = 0, losses = 0;
+  for (let i = 1; i <= period; i++) {
+    const d = closes[i] - closes[i - 1];
+    if (d > 0) gains += d; else losses -= d;
+  }
+  let avgGain = gains / period, avgLoss = losses / period;
+  for (let i = period + 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    avgGain = (avgGain * (period - 1) + (d > 0 ? d : 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + (d < 0 ? -d : 0)) / period;
+  }
+  if (avgLoss === 0) return 100;
+  return 100 - 100 / (1 + avgGain / avgLoss);
+}
+
+function calcEMA(data, period) {
+  if (data.length === 0) return [];
+  const k = 2 / (period + 1);
+  let ema = data[0];
+  const result = [ema];
+  for (let i = 1; i < data.length; i++) {
+    ema = data[i] * k + ema * (1 - k);
+    result.push(ema);
+  }
+  return result;
+}
+
+function detectCandlePattern(candles) {
+  if (candles.length < 3) return { pattern: "N/A", bullish: false };
+  const last = candles[candles.length - 1];
+  const prev = candles[candles.length - 2];
+  const [o, h, l, c] = [parseFloat(last[1]), parseFloat(last[2]), parseFloat(last[3]), parseFloat(last[4])];
+  const [po, , , pc] = [parseFloat(prev[1]), parseFloat(prev[2]), parseFloat(prev[3]), parseFloat(prev[4])];
+  const body = Math.abs(c - o);
+  const upperWick = h - Math.max(o, c);
+  const lowerWick = Math.min(o, c) - l;
+
+  if (c > o && body > Math.abs(pc - po) && c > po && o < pc) return { pattern: "Bullish Engulfing", bullish: true };
+  if (c > o && lowerWick > body * 2 && upperWick < body * 0.3) return { pattern: "Hammer", bullish: true };
+  if (c < o && upperWick > body * 2 && lowerWick < body * 0.3) return { pattern: "Shooting Star", bullish: false };
+  if (c < o && body > Math.abs(pc - po) && c < po && o > pc) return { pattern: "Bearish Engulfing", bullish: false };
+  if (c > o) return { pattern: "Green Candle", bullish: true };
+  return { pattern: "Red Candle", bullish: false };
+}
+
+function findSupportResistance(candles, count = 3) {
+  const highs = candles.map(c => parseFloat(c[2]));
+  const lows = candles.map(c => parseFloat(c[3]));
+  const closes = candles.map(c => parseFloat(c[4]));
+  const currentPrice = closes[closes.length - 1];
+  let supports = [], resistances = [];
+  for (let i = 2; i < candles.length - 2; i++) {
+    if (lows[i] <= lows[i - 1] && lows[i] <= lows[i - 2] && lows[i] <= lows[i + 1] && lows[i] <= lows[i + 2]) {
+      if (lows[i] < currentPrice) supports.push(lows[i]);
+    }
+    if (highs[i] >= highs[i - 1] && highs[i] >= highs[i - 2] && highs[i] >= highs[i + 1] && highs[i] >= highs[i + 2]) {
+      if (highs[i] > currentPrice) resistances.push(highs[i]);
+    }
+  }
+  supports.sort((a, b) => b - a);
+  resistances.sort((a, b) => a - b);
+  return {
+    supports: supports.slice(0, count),
+    resistances: resistances.slice(0, count),
+    nearSupport: supports.length > 0 && ((currentPrice - supports[0]) / currentPrice) < 0.02,
+  };
+}
+
+function detectFVG(candles) {
+  for (let i = candles.length - 5; i >= Math.max(0, candles.length - 20); i--) {
+    const h1 = parseFloat(candles[i][2]);
+    const l3 = parseFloat(candles[i + 2][3]);
+    if (l3 > h1) {
+      const currentPrice = parseFloat(candles[candles.length - 1][4]);
+      const gapMid = (l3 + h1) / 2;
+      const inFVG = currentPrice >= h1 && currentPrice <= l3;
+      const nearFVG = Math.abs(currentPrice - gapMid) / currentPrice < 0.015;
+      if (inFVG || nearFVG) return { found: true, high: l3, low: h1, mid: gapMid, inZone: inFVG };
+    }
+  }
+  return { found: false };
+}
+
+// ─── Scoring Engine ──────────────────────────────────────────────
+function scoreToken(data, btcData) {
+  const { candles1h, candles4h } = data;
+  if (!candles1h || !candles4h || candles1h.length < 50) return null;
+
+  const closes1h = candles1h.map(c => parseFloat(c[4]));
+  const volumes1h = candles1h.map(c => parseFloat(c[5]));
+  const closes4h = candles4h.map(c => parseFloat(c[4]));
+  const currentPrice = closes1h[closes1h.length - 1];
+
+  const rsi1h = calcRSI(closes1h);
+  const rsi4h = calcRSI(closes4h);
+  const ema200 = calcEMA(closes1h, Math.min(200, closes1h.length - 1));
+  const currentEMA200 = ema200[ema200.length - 1];
+  const priceVsEMA = ((currentPrice - currentEMA200) / currentEMA200) * 100;
+
+  const recentVol = volumes1h.slice(-5).reduce((a, b) => a + b, 0) / 5;
+  const avgVol20 = volumes1h.slice(-20).reduce((a, b) => a + b, 0) / 20;
+  const volRatio = avgVol20 > 0 ? recentVol / avgVol20 : 0;
+
+  const { pattern, bullish } = detectCandlePattern(candles1h);
+  const { supports, resistances, nearSupport } = findSupportResistance(candles1h);
+  const fvg = detectFVG(candles1h);
+
+  const btcCloses = btcData?.candles4h?.map(c => parseFloat(c[4])) || [];
+  const btcLast = btcCloses[btcCloses.length - 1] || 0;
+  const btcPrev4h = btcCloses[btcCloses.length - 2] || btcLast;
+  const btcChange4h = btcPrev4h > 0 ? ((btcLast - btcPrev4h) / btcPrev4h) * 100 : 0;
+  const btcSafe = btcChange4h > -3;
+
+  const idx24hAgo = Math.max(0, closes1h.length - 25);
+  const change24h = closes1h[idx24hAgo] > 0 ? ((currentPrice - closes1h[idx24hAgo]) / closes1h[idx24hAgo]) * 100 : 0;
+
+  let score = 0;
+  let reasons = [];
+  let setupType = "None";
+
+  if (rsi1h !== null) {
+    if (rsi1h >= 30 && rsi1h <= 40) { score += 30; reasons.push(`RSI 1H in primary zone (${rsi1h.toFixed(1)})`); }
+    else if (rsi1h > 40 && rsi1h <= 50) { score += 15; reasons.push(`RSI 1H neutral (${rsi1h.toFixed(1)})`); }
+    else if (rsi1h < 30) { score += 20; reasons.push(`RSI 1H deeply oversold (${rsi1h.toFixed(1)})`); }
+    else if (rsi1h > 70) { score -= 20; reasons.push(`RSI 1H overbought (${rsi1h.toFixed(1)})`); }
+  }
+
+  if (nearSupport) { score += 20; reasons.push("Price near key support level"); }
+  if (priceVsEMA > -2 && priceVsEMA < 2) { score += 10; reasons.push(`Near 200 EMA (${priceVsEMA > 0 ? "+" : ""}${priceVsEMA.toFixed(1)}%)`); }
+  if (volRatio > 1.2) { score += 15; reasons.push(`Volume ${volRatio.toFixed(1)}x above average`); }
+  else if (volRatio > 0.8) { score += 5; reasons.push("Adequate volume"); }
+  else { reasons.push("⚠ Low volume — weak conviction"); }
+  if (bullish && nearSupport) { score += 15; reasons.push(`${pattern} at support`); }
+  else if (bullish) { score += 5; reasons.push(pattern); }
+  if (fvg.found && fvg.inZone && rsi1h < 50) { score += 20; reasons.push("Price in FVG reclaim zone"); }
+  if (!btcSafe) { score -= 40; reasons.push(`⛔ BTC risk-off (${btcChange4h.toFixed(1)}% on 4H)`); }
+
+  if (rsi1h >= 30 && rsi1h <= 40 && nearSupport && bullish && volRatio > 0.8 && btcSafe) {
+    setupType = "A: RSI + Structure"; score += 10;
+  } else if (fvg.found && fvg.inZone && rsi1h < 50 && btcSafe) {
+    setupType = "B: FVG Reclaim";
+  } else if (rsi1h < 60 && change24h < 2 && btcSafe && score >= 40) {
+    setupType = "C: Momentum Candidate";
+  }
+
+  const nearestSupport = supports[0] || currentPrice * 0.98;
+  const stopLoss = setupType.startsWith("C") ? currentPrice * 0.985 : nearestSupport * 0.995;
+  const tp1 = currentPrice * 1.035;
+  const tp2 = currentPrice * 1.05;
+  const riskPct = ((currentPrice - stopLoss) / currentPrice) * 100;
+
+  return {
+    rsi1h, rsi4h, currentPrice, ema200: currentEMA200, priceVsEMA,
+    volRatio, pattern, bullish, supports, resistances, nearSupport,
+    fvg, btcChange4h, btcSafe, change24h, score, reasons, setupType,
+    stopLoss, tp1, tp2, riskPct,
+    entry: setupType !== "None" && btcSafe,
+  };
+}
+
+// ─── Components ──────────────────────────────────────────────────
+function MiniChart({ candles, width = 300, height = 80 }) {
+  const canvasRef = useRef(null);
+  useEffect(() => {
+    if (!candles || candles.length === 0) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, width, height);
+
+    const closes = candles.map(c => parseFloat(c[4]));
+    const min = Math.min(...closes) * 0.999;
+    const max = Math.max(...closes) * 1.001;
+    const range = max - min || 1;
+    const p = 2;
+
+    const isGreen = closes[closes.length - 1] >= closes[0];
+
+    // gradient fill
+    const grad = ctx.createLinearGradient(0, 0, 0, height);
+    grad.addColorStop(0, isGreen ? "rgba(34,197,94,0.18)" : "rgba(239,68,68,0.18)");
+    grad.addColorStop(1, "rgba(10,10,18,0)");
+    ctx.beginPath();
+    closes.forEach((v, i) => {
+      const x = p + (i / (closes.length - 1)) * (width - p * 2);
+      const y = p + (1 - (v - min) / range) * (height - p * 2);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.lineTo(p + width - p * 2, height);
+    ctx.lineTo(p, height);
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // EMA 20
+    const ema = calcEMA(closes, 20);
+    ctx.beginPath();
+    ctx.strokeStyle = "rgba(251,191,36,0.35)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ema.forEach((v, i) => {
+      const x = p + (i / (ema.length - 1)) * (width - p * 2);
+      const y = p + (1 - (v - min) / range) * (height - p * 2);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // price line
+    ctx.beginPath();
+    ctx.strokeStyle = isGreen ? "#22c55e" : "#ef4444";
+    ctx.lineWidth = 1.8;
+    closes.forEach((v, i) => {
+      const x = p + (i / (closes.length - 1)) * (width - p * 2);
+      const y = p + (1 - (v - min) / range) * (height - p * 2);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // dot at end
+    const lastX = width - p;
+    const lastY = p + (1 - (closes[closes.length - 1] - min) / range) * (height - p * 2);
+    ctx.beginPath();
+    ctx.arc(lastX, lastY, 3, 0, Math.PI * 2);
+    ctx.fillStyle = isGreen ? "#22c55e" : "#ef4444";
+    ctx.fill();
+  }, [candles, width, height]);
+
+  return <canvas ref={canvasRef} style={{ width: "100%", maxWidth: width, height, display: "block" }} />;
+}
+
+function RSIBar({ value }) {
+  if (value == null) return <span style={{ color: "#6b7280", fontSize: 11 }}>—</span>;
+  const color = value <= 30 ? "#22c55e" : value <= 40 ? "#4ade80" : value <= 50 ? "#fbbf24" : value <= 70 ? "#f97316" : "#ef4444";
+  const label = value <= 30 ? "OVERSOLD" : value <= 40 ? "BUY ZONE" : value <= 50 ? "NEUTRAL" : value <= 70 ? "WARM" : "OVERBOUGHT";
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+      <div style={{ width: 60, height: 5, background: "#1a1a2e", borderRadius: 3, overflow: "hidden", flexShrink: 0 }}>
+        <div style={{ width: `${Math.min(value, 100)}%`, height: "100%", background: color, borderRadius: 3, transition: "width 0.6s ease" }} />
+      </div>
+      <span style={{ color, fontSize: 13, fontWeight: 700, fontFamily: "var(--mono)" }}>{value.toFixed(1)}</span>
+      <span style={{ color, fontSize: 9, fontWeight: 700, letterSpacing: 1.2 }}>{label}</span>
+    </div>
+  );
+}
+
+function fp(p) {
+  if (p >= 1000) return p.toFixed(2);
+  if (p >= 1) return p.toFixed(3);
+  return p.toFixed(5);
+}
+
+function NarrativeTags({ narratives }) {
+  return (
+    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+      {narratives.map(n => (
+        <span key={n} style={{
+          fontSize: 9, fontWeight: 700, letterSpacing: 1,
+          padding: "2px 6px", borderRadius: 3,
+          background: `${NARRATIVE_COLORS[n] || "#818cf8"}22`,
+          color: NARRATIVE_COLORS[n] || "#818cf8",
+        }}>{n}</span>
+      ))}
+    </div>
+  );
+}
+
+// ─── Settings Modal ──────────────────────────────────────────────
+function SettingsModal({ tokens, onSave, onClose }) {
+  const [list, setList] = useState(tokens.filter(t => t.role === "alt"));
+  const [newSymbol, setNewSymbol] = useState("");
+  const [newName, setNewName] = useState("");
+
+  const remove = (sym) => setList(prev => prev.filter(t => t.symbol !== sym));
+  const add = () => {
+    const sym = newSymbol.toUpperCase().replace(/[^A-Z]/g, "");
+    if (!sym || !newName) return;
+    const full = sym.endsWith("USDT") ? sym : sym + "USDT";
+    if (list.find(t => t.symbol === full)) return;
+    setList(prev => [...prev, { symbol: full, name: newName, role: "alt", narrative: [] }]);
+    setNewSymbol("");
+    setNewName("");
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", backdropFilter: "blur(6px)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ background: "#12121e", borderTop: "1px solid #2a2a3e", borderRadius: "16px 16px 0 0", width: "100%", maxWidth: 500, maxHeight: "80vh", overflow: "auto", padding: 20 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <h2 style={{ fontSize: 16, fontWeight: 800 }}>Token Watchlist</h2>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#6b7280", fontSize: 20, cursor: "pointer" }}>✕</button>
+        </div>
+
+        {/* Add Token */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+          <input value={newSymbol} onChange={e => setNewSymbol(e.target.value)} placeholder="DOGE" style={{
+            flex: 1, background: "#1a1a2e", border: "1px solid #2a2a3e", borderRadius: 8,
+            padding: "8px 12px", color: "#e2e8f0", fontSize: 13, fontFamily: "var(--mono)", outline: "none",
+          }} />
+          <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Dogecoin" style={{
+            flex: 1, background: "#1a1a2e", border: "1px solid #2a2a3e", borderRadius: 8,
+            padding: "8px 12px", color: "#e2e8f0", fontSize: 13, outline: "none",
+          }} />
+          <button onClick={add} style={{ background: "#818cf8", color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>+</button>
+        </div>
+
+        {/* Token List */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {list.map(t => (
+            <div key={t.symbol} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#1a1a2e", borderRadius: 8, padding: "8px 12px" }}>
+              <div>
+                <span style={{ fontWeight: 700, fontSize: 13 }}>{t.name}</span>
+                <span style={{ color: "#6b7280", fontSize: 11, fontFamily: "var(--mono)", marginLeft: 8 }}>{t.symbol}</span>
+              </div>
+              <button onClick={() => remove(t.symbol)} style={{ background: "none", border: "none", color: "#ef4444", fontSize: 16, cursor: "pointer", padding: "0 4px" }}>×</button>
+            </div>
+          ))}
+        </div>
+
+        <button onClick={() => { onSave(list); onClose(); }} style={{
+          width: "100%", marginTop: 16, background: "#818cf8", color: "#fff", border: "none",
+          borderRadius: 10, padding: "12px", fontWeight: 700, fontSize: 14, cursor: "pointer",
+        }}>Save & Rescan</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Main App ────────────────────────────────────────────────────
+export default function App() {
+  const [tokens, setTokens] = useState(() => {
+    try { const saved = localStorage.getItem("pb_tokens"); return saved ? JSON.parse(saved) : DEFAULT_TOKENS; }
+    catch { return DEFAULT_TOKENS; }
+  });
+  const [data, setData] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [progress, setProgress] = useState(0);
+  const [lastUpdate, setLastUpdate] = useState(null);
+  const [sortBy, setSortBy] = useState("score");
+  const [expanded, setExpanded] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const timerRef = useRef(null);
+
+  const saveTokens = (altList) => {
+    const btc = tokens.find(t => t.role === "benchmark") || DEFAULT_TOKENS[0];
+    const full = [btc, ...altList];
+    setTokens(full);
+    localStorage.setItem("pb_tokens", JSON.stringify(full));
+  };
+
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    setProgress(0);
+    const results = {};
+    const total = tokens.length;
+    for (let idx = 0; idx < total; idx++) {
+      const token = tokens[idx];
+      try {
+        const [res1h, res4h] = await Promise.all([
+          fetch(`https://api.binance.com/api/v3/klines?symbol=${token.symbol}&interval=1h&limit=210`),
+          fetch(`https://api.binance.com/api/v3/klines?symbol=${token.symbol}&interval=4h&limit=100`),
+        ]);
+        if (res1h.ok && res4h.ok) {
+          const [candles1h, candles4h] = await Promise.all([res1h.json(), res4h.json()]);
+          results[token.symbol] = { candles1h, candles4h, ...token };
+        }
+      } catch (e) { console.warn(`Failed: ${token.symbol}`, e); }
+      setProgress(Math.round(((idx + 1) / total) * 100));
+      if (idx < total - 1) await new Promise(r => setTimeout(r, 100));
+    }
+    setData(results);
+    setLastUpdate(new Date());
+    setLoading(false);
+  }, [tokens]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  // Auto-refresh every 5 min
+  useEffect(() => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (autoRefresh) {
+      timerRef.current = setInterval(fetchData, 5 * 60 * 1000);
+    }
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, [autoRefresh, fetchData]);
+
+  const btcData = data["BTCUSDT"] || null;
+  const btcAnalysis = btcData ? scoreToken(btcData, btcData) : null;
+
+  const altResults = useMemo(() =>
+    tokens.filter(t => t.role === "alt").map(t => {
+      const d = data[t.symbol];
+      if (!d) return { ...t, analysis: null };
+      return { ...t, analysis: scoreToken(d, btcData) };
+    }).filter(t => t.analysis),
+    [data, tokens, btcData]
+  );
+
+  const sorted = useMemo(() =>
+    [...altResults].sort((a, b) => {
+      if (sortBy === "score") return (b.analysis?.score || 0) - (a.analysis?.score || 0);
+      if (sortBy === "rsi") return (a.analysis?.rsi1h || 100) - (b.analysis?.rsi1h || 100);
+      if (sortBy === "volume") return (b.analysis?.volRatio || 0) - (a.analysis?.volRatio || 0);
+      if (sortBy === "change") return (b.analysis?.change24h || 0) - (a.analysis?.change24h || 0);
+      return 0;
+    }),
+    [altResults, sortBy]
+  );
+
+  const shortlist = sorted.filter(t => t.analysis && t.analysis.score >= 40 && t.analysis.btcSafe);
+
+  // Narrative aggregation
+  const narrativeHeat = useMemo(() => {
+    const map = {};
+    altResults.forEach(t => {
+      (t.narrative || []).forEach(n => {
+        if (!map[n]) map[n] = { changes: [], count: 0 };
+        map[n].changes.push(t.analysis?.change24h || 0);
+        map[n].count++;
+      });
+    });
+    return Object.entries(map).map(([name, d]) => {
+      const avg = d.changes.reduce((a, b) => a + b, 0) / d.changes.length;
+      const pumping = d.changes.filter(c => c > 5).length;
+      return { name, avg, pumping, total: d.count, hot: pumping >= 2 || avg > 4 };
+    }).sort((a, b) => b.avg - a.avg);
+  }, [altResults]);
+
+  return (
+    <div style={{ "--mono": "'JetBrains Mono', 'Fira Code', monospace", minHeight: "100dvh", background: "#0a0a12", color: "#e2e8f0", fontFamily: "'Inter', system-ui, -apple-system, sans-serif" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap');
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: #2a2a3e; border-radius: 2px; }
+        @keyframes fadeUp { from { opacity:0; transform:translateY(10px) } to { opacity:1; transform:translateY(0) } }
+        @keyframes shimmer { 0% { background-position: -200% 0 } 100% { background-position: 200% 0 } }
+        @keyframes glow { 0%,100% { box-shadow: 0 0 8px rgba(129,140,248,0.3) } 50% { box-shadow: 0 0 16px rgba(129,140,248,0.6) } }
+        .card { animation: fadeUp 0.35s ease both; }
+        .shimmer { background: linear-gradient(90deg,#1a1a2e 25%,#252540 50%,#1a1a2e 75%); background-size:200% 100%; animation:shimmer 1.5s infinite; border-radius:12px; }
+      `}</style>
+
+      {/* ── Header ── */}
+      <header style={{
+        position: "sticky", top: 0, zIndex: 100, borderBottom: "1px solid #1a1a2e",
+        background: "rgba(10,10,18,0.88)", backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)",
+        padding: "12px 16px",
+      }}>
+        <div style={{ maxWidth: 600, margin: "0 auto", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <h1 style={{ fontSize: 17, fontWeight: 900, letterSpacing: "-0.03em" }}>
+              <span style={{ color: "#818cf8" }}>◈</span> PLAYBOOK SCANNER
+            </h1>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
+              <span style={{ fontSize: 10, color: "#6b7280", fontFamily: "var(--mono)" }}>
+                {lastUpdate ? lastUpdate.toLocaleTimeString() : "—"}
+              </span>
+              {autoRefresh && <span style={{ fontSize: 9, color: "#4ade80", fontWeight: 600 }}>● AUTO</span>}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setShowSettings(true)} style={{ background: "#1a1a2e", border: "1px solid #2a2a3e", color: "#94a3b8", width: 36, height: 36, borderRadius: 8, cursor: "pointer", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center" }}>⚙</button>
+            <button onClick={() => setAutoRefresh(p => !p)} style={{ background: autoRefresh ? "#1e3a5f" : "#1a1a2e", border: `1px solid ${autoRefresh ? "#3b82f6" : "#2a2a3e"}`, color: autoRefresh ? "#60a5fa" : "#6b7280", width: 36, height: 36, borderRadius: 8, cursor: "pointer", fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center" }}>⟳</button>
+            <button onClick={fetchData} disabled={loading} style={{ background: loading ? "#1a1a2e" : "#818cf8", color: "#fff", border: "none", borderRadius: 8, padding: "0 14px", height: 36, fontWeight: 700, fontSize: 12, cursor: loading ? "default" : "pointer", opacity: loading ? 0.6 : 1 }}>
+              {loading ? `${progress}%` : "SCAN"}
+            </button>
+          </div>
+        </div>
+        {loading && (
+          <div style={{ position: "absolute", bottom: 0, left: 0, height: 2, background: "#818cf8", width: `${progress}%`, transition: "width 0.3s", borderRadius: 1 }} />
+        )}
+      </header>
+
+      <main style={{ maxWidth: 600, margin: "0 auto", padding: "12px 12px 100px" }}>
+
+        {/* ── BTC Status ── */}
+        {btcAnalysis && (
+          <div className="card" style={{
+            background: btcAnalysis.btcSafe
+              ? "linear-gradient(135deg, rgba(6,78,59,0.5) 0%, #0a0a12 100%)"
+              : "linear-gradient(135deg, rgba(127,29,29,0.5) 0%, #0a0a12 100%)",
+            border: `1px solid ${btcAnalysis.btcSafe ? "#065f4660" : "#991b1b60"}`,
+            borderRadius: 12, padding: 14, marginBottom: 10,
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: btcAnalysis.btcSafe ? "#22c55e" : "#ef4444", boxShadow: `0 0 8px ${btcAnalysis.btcSafe ? "#22c55e" : "#ef4444"}` }} />
+                  <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: 1.5 }}>
+                    BTC: {btcAnalysis.btcSafe ? "SAFE" : "⚠ RISK OFF"}
+                  </span>
+                </div>
+                <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 4, fontFamily: "var(--mono)" }}>
+                  <span style={{ color: btcAnalysis.btcChange4h >= 0 ? "#4ade80" : "#f87171", fontWeight: 600 }}>
+                    {btcAnalysis.btcChange4h >= 0 ? "+" : ""}{btcAnalysis.btcChange4h.toFixed(2)}%
+                  </span>
+                  {" 4H · "}RSI {btcAnalysis.rsi1h?.toFixed(0)} · ${fp(btcAnalysis.currentPrice)}
+                </div>
+              </div>
+              <MiniChart candles={btcData?.candles1h?.slice(-40)} width={110} height={44} />
+            </div>
+          </div>
+        )}
+
+        {/* ── Narrative Heat ── */}
+        {narrativeHeat.length > 0 && (
+          <div className="card" style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10, padding: "0 2px" }}>
+            {narrativeHeat.map(n => (
+              <div key={n.name} style={{
+                padding: "5px 10px", borderRadius: 6, fontSize: 11, fontWeight: 700,
+                background: n.hot ? `${NARRATIVE_COLORS[n.name] || "#818cf8"}18` : "#12121e",
+                border: `1px solid ${n.hot ? `${NARRATIVE_COLORS[n.name] || "#818cf8"}40` : "#1e1e2e"}`,
+                color: n.hot ? (NARRATIVE_COLORS[n.name] || "#818cf8") : "#6b7280",
+              }}>
+                {n.hot && "🔥 "}{n.name}{" "}
+                <span style={{ fontFamily: "var(--mono)", fontSize: 10 }}>{n.avg >= 0 ? "+" : ""}{n.avg.toFixed(1)}%</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ── AI Shortlist ── */}
+        {!loading && shortlist.length > 0 && (
+          <div className="card" style={{
+            background: "linear-gradient(135deg, rgba(30,27,75,0.6) 0%, #12121e 100%)",
+            border: "1px solid #312e8180", borderRadius: 12, padding: 12, marginBottom: 10,
+            animation: "glow 3s ease infinite",
+          }}>
+            <div style={{ fontSize: 11, fontWeight: 800, color: "#a5b4fc", letterSpacing: 1.5, marginBottom: 4 }}>
+              📸 SCREENSHOT FOR AI → {shortlist.length} TOKEN{shortlist.length > 1 ? "S" : ""}
+            </div>
+            <div style={{ fontSize: 11, color: "#818cf8", marginBottom: 8 }}>
+              These passed pre-screening. Take 1H + 4H charts → upload to Claude Project.
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+              {shortlist.map(t => (
+                <span key={t.symbol} style={{
+                  background: "#312e81", color: "#c7d2fe", padding: "3px 8px",
+                  borderRadius: 5, fontSize: 12, fontWeight: 700,
+                }}>
+                  {t.name} <span style={{ fontFamily: "var(--mono)", color: "#a5b4fc", fontSize: 10 }}>{t.analysis.score}</span>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {!loading && shortlist.length === 0 && btcAnalysis && (
+          <div className="card" style={{ background: "#12121e", border: "1px solid #1e1e2e", borderRadius: 12, padding: 14, marginBottom: 10, textAlign: "center" }}>
+            <div style={{ fontSize: 24, marginBottom: 6 }}>🧘</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#94a3b8" }}>No setups right now</div>
+            <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>
+              {btcAnalysis.btcSafe ? "Market is quiet. Patience is a position." : "BTC in risk-off mode. Stay in cash."}
+            </div>
+          </div>
+        )}
+
+        {/* ── Sort ── */}
+        <div style={{ display: "flex", gap: 6, marginBottom: 10, overflowX: "auto", paddingBottom: 2 }}>
+          {[["score", "Score"], ["rsi", "RSI ↓"], ["volume", "Vol ↑"], ["change", "24H ↑"]].map(([val, label]) => (
+            <button key={val} onClick={() => setSortBy(val)} style={{
+              background: sortBy === val ? "#818cf8" : "#12121e",
+              color: sortBy === val ? "#fff" : "#6b7280",
+              border: `1px solid ${sortBy === val ? "#818cf8" : "#1e1e2e"}`,
+              padding: "5px 12px", borderRadius: 6, fontSize: 11, fontWeight: 700,
+              cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0,
+            }}>{label}</button>
+          ))}
+        </div>
+
+        {/* ── Loading State ── */}
+        {loading && sorted.length === 0 && Array.from({ length: 6 }).map((_, i) => (
+          <div key={i} className="shimmer" style={{ height: 110, marginBottom: 8 }} />
+        ))}
+
+        {/* ── Token Cards ── */}
+        {sorted.map(({ symbol, name, narrative, analysis }, idx) => {
+          if (!analysis) return null;
+          const isExpanded = expanded === symbol;
+          const isGood = analysis.score >= 40 && analysis.btcSafe;
+          const hasSetup = analysis.entry;
+          const bc = hasSetup ? "#22c55e50" : isGood ? "#818cf850" : "#1e1e2e";
+
+          return (
+            <div key={symbol} className="card" style={{ animationDelay: `${idx * 0.04}s`, marginBottom: 8 }}>
+              <div
+                onClick={() => setExpanded(isExpanded ? null : symbol)}
+                style={{
+                  background: "#12121e", border: `1px solid ${bc}`, borderRadius: 12,
+                  cursor: "pointer", overflow: "hidden", transition: "border-color 0.3s",
+                }}
+              >
+                <div style={{ padding: "12px 14px" }}>
+                  {/* Top Row */}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 15, fontWeight: 800 }}>{name}</span>
+                        <span style={{ fontSize: 10, color: "#6b7280", fontFamily: "var(--mono)" }}>{symbol.replace("USDT", "")}</span>
+                        {hasSetup && (
+                          <span style={{ background: "#166534", color: "#4ade80", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 800, letterSpacing: 1 }}>SETUP</span>
+                        )}
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+                        <span style={{ fontSize: 11, color: analysis.setupType !== "None" ? "#fbbf24" : "#4b5563", fontWeight: 600 }}>{analysis.setupType}</span>
+                        {narrative && narrative.length > 0 && <NarrativeTags narratives={narrative} />}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: "right", flexShrink: 0 }}>
+                      <div style={{ fontSize: 16, fontWeight: 800, fontFamily: "var(--mono)" }}>${fp(analysis.currentPrice)}</div>
+                      <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: analysis.change24h >= 0 ? "#4ade80" : "#f87171", fontWeight: 700 }}>
+                        {analysis.change24h >= 0 ? "+" : ""}{analysis.change24h.toFixed(2)}%
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Metrics */}
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
+                    <div>
+                      <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1.2, marginBottom: 3 }}>RSI 1H</div>
+                      <RSIBar value={analysis.rsi1h} />
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1.2, marginBottom: 3 }}>VOLUME</div>
+                      <span style={{
+                        fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700,
+                        color: analysis.volRatio > 1.2 ? "#4ade80" : analysis.volRatio > 0.8 ? "#fbbf24" : "#f87171",
+                      }}>{analysis.volRatio.toFixed(2)}x</span>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1.2, marginBottom: 3 }}>SCORE</div>
+                      <span style={{
+                        fontFamily: "var(--mono)", fontSize: 16, fontWeight: 900,
+                        color: analysis.score >= 60 ? "#22c55e" : analysis.score >= 40 ? "#fbbf24" : analysis.score >= 20 ? "#f97316" : "#ef4444",
+                      }}>{analysis.score}</span>
+                    </div>
+                  </div>
+
+                  {/* Chart */}
+                  <div style={{ marginTop: 8 }}>
+                    <MiniChart candles={data[symbol]?.candles1h?.slice(-60)} width={340} height={55} />
+                  </div>
+                </div>
+
+                {/* Expanded */}
+                {isExpanded && (
+                  <div style={{ borderTop: "1px solid #1a1a2e", padding: 14, background: "#0d0d18" }}>
+                    {/* Reasons */}
+                    <div style={{ marginBottom: 14 }}>
+                      <div style={{ fontSize: 10, color: "#6b7280", fontWeight: 800, letterSpacing: 1.5, marginBottom: 6 }}>ANALYSIS</div>
+                      {analysis.reasons.map((r, i) => (
+                        <div key={i} style={{ fontSize: 12, color: "#94a3b8", padding: "2px 0" }}>
+                          <span style={{ color: "#818cf8", marginRight: 6 }}>›</span>{r}
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Grid Data */}
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10, marginBottom: 14 }}>
+                      {[
+                        ["RSI 4H", analysis.rsi4h?.toFixed(1) || "—", null],
+                        ["vs EMA200", `${analysis.priceVsEMA > 0 ? "+" : ""}${analysis.priceVsEMA.toFixed(1)}%`, analysis.priceVsEMA > 0 ? "#4ade80" : "#f87171"],
+                        ["Pattern", analysis.pattern.split(" ")[0], analysis.bullish ? "#4ade80" : "#f87171"],
+                        ["FVG", analysis.fvg.found ? (analysis.fvg.inZone ? "In Zone" : "Near") : "None", analysis.fvg.found ? "#fbbf24" : "#6b7280"],
+                      ].map(([label, val, color]) => (
+                        <div key={label}>
+                          <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1 }}>{label}</div>
+                          <div style={{ fontSize: 12, fontFamily: "var(--mono)", fontWeight: 600, color: color || "#94a3b8", marginTop: 2 }}>{val}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* S/R Levels */}
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
+                      <div>
+                        <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1, marginBottom: 4 }}>SUPPORT</div>
+                        {analysis.supports.length > 0
+                          ? analysis.supports.slice(0, 3).map((s, i) => <div key={i} style={{ fontSize: 12, color: "#4ade80", fontFamily: "var(--mono)" }}>${fp(s)}</div>)
+                          : <div style={{ fontSize: 11, color: "#4b5563" }}>Not detected</div>
+                        }
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1, marginBottom: 4 }}>RESISTANCE</div>
+                        {analysis.resistances.length > 0
+                          ? analysis.resistances.slice(0, 3).map((r, i) => <div key={i} style={{ fontSize: 12, color: "#f87171", fontFamily: "var(--mono)" }}>${fp(r)}</div>)
+                          : <div style={{ fontSize: 11, color: "#4b5563" }}>Not detected</div>
+                        }
+                      </div>
+                    </div>
+
+                    {/* Trade Levels */}
+                    {hasSetup && (
+                      <div style={{ background: "rgba(22,101,52,0.2)", border: "1px solid #16653440", borderRadius: 10, padding: 12 }}>
+                        <div style={{ fontSize: 10, color: "#4ade80", fontWeight: 800, letterSpacing: 1.5, marginBottom: 8 }}>📌 TRADE LEVELS</div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
+                          {[
+                            ["Entry", fp(analysis.currentPrice), "#f1f5f9"],
+                            ["Stop", fp(analysis.stopLoss), "#f87171"],
+                            ["TP1", fp(analysis.tp1), "#4ade80"],
+                            ["TP2", fp(analysis.tp2), "#22c55e"],
+                          ].map(([label, val, color]) => (
+                            <div key={label}>
+                              <div style={{ fontSize: 9, color: "#6b7280" }}>{label}</div>
+                              <div style={{ fontSize: 12, color, fontFamily: "var(--mono)", fontWeight: 700 }}>${val}</div>
+                            </div>
+                          ))}
+                        </div>
+                        <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 8, fontFamily: "var(--mono)" }}>
+                          Risk: <span style={{ color: "#f87171" }}>{analysis.riskPct.toFixed(2)}%</span>
+                          {" · R:R ≈ "}<span style={{ color: "#4ade80" }}>{(3.5 / analysis.riskPct).toFixed(1)}:1</span>
+                          {" · Max hold: "}<span style={{ color: "#fbbf24" }}>48H</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+
+        {/* Footer */}
+        <div style={{ textAlign: "center", padding: "24px 0 8px", color: "#4b5563", fontSize: 10 }}>
+          <p>Score ≥ 40 + BTC safe = screenshot for AI</p>
+          <p style={{ marginTop: 2 }}>Binance public API · Auto-refresh 5min · Not financial advice</p>
+        </div>
+      </main>
+
+      {/* Settings */}
+      {showSettings && <SettingsModal tokens={tokens} onSave={saveTokens} onClose={() => setShowSettings(false)} />}
+    </div>
+  );
+}
