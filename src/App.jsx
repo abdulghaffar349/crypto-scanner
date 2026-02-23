@@ -17,11 +17,23 @@ const DEFAULT_TOKENS = [
   { symbol: "NEARUSDT", name: "NEAR", role: "alt", narrative: ["AI", "L1"] },
   { symbol: "FETUSDT", name: "Fetch.ai", role: "alt", narrative: ["AI"] },
   { symbol: "APTUSDT", name: "Aptos", role: "alt", narrative: ["L1"] },
+  { symbol: "MKRUSDT", name: "Maker", role: "alt", narrative: ["DeFi", "RWA"] },
+  { symbol: "PENDLEUSDT", name: "Pendle", role: "alt", narrative: ["DeFi"] },
+  { symbol: "CRVUSDT", name: "Curve", role: "alt", narrative: ["DeFi"] },
+  { symbol: "ARBUSDT", name: "Arbitrum", role: "alt", narrative: ["L2", "Infra"] },
+  { symbol: "OPUSDT", name: "Optimism", role: "alt", narrative: ["L2", "Infra"] },
+  { symbol: "ATOMUSDT", name: "Cosmos", role: "alt", narrative: ["L1", "Infra"] },
+  { symbol: "TIAUSDT", name: "Celestia", role: "alt", narrative: ["L1", "Infra"] },
+  { symbol: "ARKMUSDT", name: "Arkham", role: "alt", narrative: ["AI", "Infra"] },
+  { symbol: "WLDUSDT", name: "Worldcoin", role: "alt", narrative: ["AI"] },
+  { symbol: "IMXUSDT", name: "Immutable", role: "alt", narrative: ["Gaming", "L2"] },
+  { symbol: "DOGEUSDT", name: "Dogecoin", role: "alt", narrative: ["Meme"] },
 ];
 
 const NARRATIVE_COLORS = {
   AI: "#a78bfa", RWA: "#f472b6", DeFi: "#34d399",
   L1: "#60a5fa", Oracle: "#fbbf24", Infra: "#fb923c",
+  L2: "#38bdf8", Gaming: "#c084fc", Meme: "#facc15",
 };
 
 // ─── Technical Analysis Functions ────────────────────────────────
@@ -52,6 +64,60 @@ function calcEMA(data, period) {
     result.push(ema);
   }
   return result;
+}
+
+function calcMACD(closes) {
+  if (closes.length < 35) return null;
+  const ema12 = calcEMA(closes, 12);
+  const ema26 = calcEMA(closes, 26);
+  const macdLine = ema12.map((v, i) => v - ema26[i]);
+  const signalLine = calcEMA(macdLine.slice(26), 9);
+  const macdSlice = macdLine.slice(26);
+  const cur = macdSlice.length - 1;
+  const prev = macdSlice.length - 2;
+  if (cur < 0 || prev < 0 || signalLine.length < 2) return null;
+  const histogram = macdSlice[cur] - signalLine[signalLine.length - 1];
+  const prevHistogram = macdSlice[prev] - signalLine[signalLine.length - 2];
+  return {
+    macd: macdSlice[cur], signal: signalLine[signalLine.length - 1], histogram,
+    bullishCross: prevHistogram <= 0 && histogram > 0,
+    bearishCross: prevHistogram >= 0 && histogram < 0,
+    rising: histogram > prevHistogram,
+  };
+}
+
+function calcATR(candles, period = 14) {
+  if (candles.length < period + 1) return null;
+  const trs = [];
+  for (let i = 1; i < candles.length; i++) {
+    const h = parseFloat(candles[i][2]), l = parseFloat(candles[i][3]), pc = parseFloat(candles[i - 1][4]);
+    trs.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
+  }
+  let atr = trs.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < trs.length; i++) atr = (atr * (period - 1) + trs[i]) / period;
+  return atr;
+}
+
+function calcBollingerBands(closes, period = 20, mult = 2) {
+  if (closes.length < period) return null;
+  const slice = closes.slice(-period);
+  const sma = slice.reduce((a, b) => a + b, 0) / period;
+  const stdDev = Math.sqrt(slice.reduce((a, v) => a + (v - sma) ** 2, 0) / period);
+  const upper = sma + stdDev * mult, lower = sma - stdDev * mult;
+  const bandwidth = ((upper - lower) / sma) * 100;
+  const percentB = upper !== lower ? (closes[closes.length - 1] - lower) / (upper - lower) : 0.5;
+  let avgBandwidth = bandwidth;
+  if (closes.length >= 70) {
+    const bws = [];
+    for (let i = period; i <= closes.length; i++) {
+      const s = closes.slice(i - period, i);
+      const m = s.reduce((a, b) => a + b, 0) / period;
+      const sd = Math.sqrt(s.reduce((a, val) => a + (val - m) ** 2, 0) / period);
+      bws.push(((m + sd * mult - (m - sd * mult)) / m) * 100);
+    }
+    avgBandwidth = bws.reduce((a, b) => a + b, 0) / bws.length;
+  }
+  return { upper, lower, sma, bandwidth, percentB, squeeze: bandwidth < avgBandwidth * 0.75 };
 }
 
 function detectCandlePattern(candles) {
@@ -134,6 +200,32 @@ function scoreToken(data, btcData) {
   const { supports, resistances, nearSupport } = findSupportResistance(candles1h);
   const fvg = detectFVG(candles1h);
 
+  // New indicators
+  const macd = calcMACD(closes1h);
+  const atr = calcATR(candles1h);
+  const bb = calcBollingerBands(closes1h);
+  const ema20arr = calcEMA(closes1h, 20);
+  const ema50arr = calcEMA(closes1h, 50);
+  const currentEMA20 = ema20arr[ema20arr.length - 1];
+  const currentEMA50 = ema50arr[ema50arr.length - 1];
+  const inUptrend = closes1h.length >= 50 && currentEMA20 > currentEMA50;
+  const trendStrength = currentEMA50 > 0 ? ((currentEMA20 - currentEMA50) / currentEMA50) * 100 : 0;
+
+  // ROC (10-period rate of change)
+  const rocPeriod = 10;
+  const roc = closes1h.length > rocPeriod
+    ? ((currentPrice - closes1h[closes1h.length - 1 - rocPeriod]) / closes1h[closes1h.length - 1 - rocPeriod]) * 100 : 0;
+  const prevRoc = closes1h.length > rocPeriod + 5
+    ? ((closes1h[closes1h.length - 6] - closes1h[closes1h.length - 6 - rocPeriod]) / closes1h[closes1h.length - 6 - rocPeriod]) * 100 : 0;
+  const momentumImproving = roc > prevRoc && roc < 5;
+
+  // Volume spike detection
+  const latestVol = volumes1h[volumes1h.length - 1];
+  const volSpike = avgVol20 > 0 ? latestVol / avgVol20 : 0;
+  const isVolumeClimax = volSpike > 2.0;
+  const nearResistance = resistances.length > 0 && ((resistances[0] - currentPrice) / currentPrice) < 0.02;
+  const volContext = isVolumeClimax ? (nearSupport ? "accumulation" : nearResistance ? "distribution" : "spike") : "normal";
+
   const btcCloses = btcData?.candles4h?.map(c => parseFloat(c[4])) || [];
   const btcLast = btcCloses[btcCloses.length - 1] || 0;
   const btcPrev4h = btcCloses[btcCloses.length - 2] || btcLast;
@@ -147,6 +239,7 @@ function scoreToken(data, btcData) {
   let reasons = [];
   let setupType = "None";
 
+  // ── RSI 1H scoring ──
   if (rsi1h !== null) {
     if (rsi1h >= 30 && rsi1h <= 40) { score += 30; reasons.push(`RSI 1H in primary zone (${rsi1h.toFixed(1)})`); }
     else if (rsi1h > 40 && rsi1h <= 50) { score += 15; reasons.push(`RSI 1H neutral (${rsi1h.toFixed(1)})`); }
@@ -154,16 +247,58 @@ function scoreToken(data, btcData) {
     else if (rsi1h > 70) { score -= 20; reasons.push(`RSI 1H overbought (${rsi1h.toFixed(1)})`); }
   }
 
+  // ── Multi-TF RSI alignment ──
+  if (rsi1h !== null && rsi4h !== null) {
+    if (rsi1h < 40 && rsi4h < 40) { score += 15; reasons.push(`RSI aligned oversold (4H: ${rsi4h.toFixed(0)})`); }
+    else if (rsi1h > 65 && rsi4h > 65) { score -= 15; reasons.push(`RSI aligned overbought (4H: ${rsi4h.toFixed(0)})`); }
+    else if ((rsi1h < 40 && rsi4h > 60) || (rsi1h > 60 && rsi4h < 40)) { score -= 5; reasons.push(`RSI timeframe divergence (4H: ${rsi4h.toFixed(0)})`); }
+  }
+
+  // ── Structure + EMA ──
   if (nearSupport) { score += 20; reasons.push("Price near key support level"); }
   if (priceVsEMA > -2 && priceVsEMA < 2) { score += 10; reasons.push(`Near 200 EMA (${priceVsEMA > 0 ? "+" : ""}${priceVsEMA.toFixed(1)}%)`); }
+
+  // ── Volume scoring ──
   if (volRatio > 1.2) { score += 15; reasons.push(`Volume ${volRatio.toFixed(1)}x above average`); }
   else if (volRatio > 0.8) { score += 5; reasons.push("Adequate volume"); }
   else { reasons.push("⚠ Low volume — weak conviction"); }
+  if (isVolumeClimax && nearSupport) { score += 10; reasons.push("Volume climax at support — accumulation"); }
+  else if (isVolumeClimax && nearResistance) { score -= 5; reasons.push("Volume climax at resistance — distribution risk"); }
+
+  // ── Candle patterns ──
   if (bullish && nearSupport) { score += 15; reasons.push(`${pattern} at support`); }
   else if (bullish) { score += 5; reasons.push(pattern); }
   if (fvg.found && fvg.inZone && rsi1h < 50) { score += 20; reasons.push("Price in FVG reclaim zone"); }
+
+  // ── MACD ──
+  if (macd) {
+    if (macd.bullishCross) { score += 15; reasons.push("MACD bullish crossover"); }
+    else if (macd.rising && macd.histogram < 0) { score += 5; reasons.push("MACD momentum improving"); }
+    if (macd.bearishCross) { score -= 10; reasons.push("MACD bearish crossover"); }
+  }
+
+  // ── Trend direction ──
+  if (closes1h.length >= 50) {
+    if (inUptrend && rsi1h < 45) { score += 10; reasons.push(`Dip in uptrend (EMA20 > EMA50 by ${trendStrength.toFixed(1)}%)`); }
+    else if (!inUptrend && rsi1h < 40) { score -= 10; reasons.push("Dip in downtrend — catching knife risk"); }
+  }
+
+  // ── Bollinger Bands ──
+  if (bb) {
+    if (bb.percentB < 0.15 && rsi1h < 40) { score += 15; reasons.push("Price at lower Bollinger Band + RSI oversold"); }
+    else if (bb.percentB < 0.2) { score += 5; reasons.push("Near lower Bollinger Band"); }
+    if (bb.squeeze) { score += 5; reasons.push("Bollinger squeeze — breakout imminent"); }
+    if (bb.percentB > 0.95 && rsi1h > 65) { score -= 10; reasons.push("At upper BB + RSI high — overextended"); }
+  }
+
+  // ── Momentum (ROC) ──
+  if (momentumImproving && rsi1h < 55) { score += 10; reasons.push(`Momentum improving (ROC: ${roc.toFixed(1)}%)`); }
+  else if (roc < -8) { score -= 5; reasons.push(`Momentum deteriorating (ROC: ${roc.toFixed(1)}%)`); }
+
+  // ── BTC risk ──
   if (!btcSafe) { score -= 40; reasons.push(`⛔ BTC risk-off (${btcChange4h.toFixed(1)}% on 4H)`); }
 
+  // ── Setup detection ──
   if (rsi1h >= 30 && rsi1h <= 40 && nearSupport && bullish && volRatio > 0.8 && btcSafe) {
     setupType = "A: RSI + Structure"; score += 10;
   } else if (fvg.found && fvg.inZone && rsi1h < 50 && btcSafe) {
@@ -172,18 +307,25 @@ function scoreToken(data, btcData) {
     setupType = "C: Momentum Candidate";
   }
 
+  // ── ATR-based trade levels ──
   const nearestSupport = supports[0] || currentPrice * 0.98;
-  const stopLoss = setupType.startsWith("C") ? currentPrice * 0.985 : nearestSupport * 0.995;
-  const tp1 = currentPrice * 1.035;
-  const tp2 = currentPrice * 1.05;
+  const atrStop = atr ? currentPrice - (atr * 1.5) : currentPrice * 0.985;
+  const supportStop = nearestSupport * 0.995;
+  const stopLoss = setupType.startsWith("C") ? (atr ? currentPrice - atr * 1.5 : currentPrice * 0.985) : Math.max(atrStop, supportStop);
+  const tp1 = atr ? currentPrice + atr * 2 : currentPrice * 1.035;
+  const tp2 = atr ? currentPrice + atr * 3.5 : currentPrice * 1.05;
   const riskPct = ((currentPrice - stopLoss) / currentPrice) * 100;
+  const rewardPct = ((tp1 - currentPrice) / currentPrice) * 100;
+  const rrRatio = riskPct > 0 ? rewardPct / riskPct : 0;
 
   return {
     rsi1h, rsi4h, currentPrice, ema200: currentEMA200, priceVsEMA,
     volRatio, pattern, bullish, supports, resistances, nearSupport,
     fvg, btcChange4h, btcSafe, change24h, score, reasons, setupType,
-    stopLoss, tp1, tp2, riskPct,
+    stopLoss, tp1, tp2, riskPct, rrRatio,
     entry: setupType !== "None" && btcSafe,
+    macd, inUptrend, trendStrength, atr, bb, roc, momentumImproving,
+    volSpike, volContext, isVolumeClimax,
   };
 }
 
@@ -271,6 +413,22 @@ function RSIBar({ value }) {
       </div>
       <span style={{ color, fontSize: 13, fontWeight: 700, fontFamily: "var(--mono)" }}>{value.toFixed(1)}</span>
       <span style={{ color, fontSize: 9, fontWeight: 700, letterSpacing: 1.2 }}>{label}</span>
+    </div>
+  );
+}
+
+function SignalStrength({ score }) {
+  const bars = score <= 0 ? 0 : score < 20 ? 1 : score < 40 ? 2 : score < 60 ? 3 : score < 80 ? 4 : 5;
+  const color = bars <= 1 ? "#ef4444" : bars <= 2 ? "#f97316" : bars <= 3 ? "#fbbf24" : bars <= 4 ? "#4ade80" : "#22c55e";
+  const label = ["AVOID", "WEAK", "FAIR", "GOOD", "STRONG", "PRIME"][bars];
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+      <div style={{ display: "flex", gap: 1.5, alignItems: "flex-end" }}>
+        {[0, 1, 2, 3, 4].map(i => (
+          <div key={i} style={{ width: 4, height: 6 + i * 3, borderRadius: 1, background: i < bars ? color : "#1a1a2e", transition: "background 0.3s" }} />
+        ))}
+      </div>
+      <span style={{ fontSize: 9, fontWeight: 700, color, letterSpacing: 1 }}>{label}</span>
     </div>
   );
 }
@@ -370,7 +528,21 @@ export default function App() {
   const [expanded, setExpanded] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [watchlist, setWatchlist] = useState(() => {
+    try { const saved = localStorage.getItem("pb_watchlist"); return saved ? new Set(JSON.parse(saved)) : new Set(); }
+    catch { return new Set(); }
+  });
+  const [viewFilter, setViewFilter] = useState("all"); // "all" | "watched"
   const timerRef = useRef(null);
+
+  const toggleWatch = (symbol) => {
+    setWatchlist(prev => {
+      const next = new Set(prev);
+      if (next.has(symbol)) next.delete(symbol); else next.add(symbol);
+      localStorage.setItem("pb_watchlist", JSON.stringify([...next]));
+      return next;
+    });
+  };
 
   const saveTokens = (altList) => {
     const btc = tokens.find(t => t.role === "benchmark") || DEFAULT_TOKENS[0];
@@ -438,6 +610,11 @@ export default function App() {
     [altResults, sortBy]
   );
 
+  const displayed = useMemo(() =>
+    viewFilter === "watched" ? sorted.filter(t => watchlist.has(t.symbol)) : sorted,
+    [sorted, viewFilter, watchlist]
+  );
+
   const shortlist = sorted.filter(t => t.analysis && t.analysis.score >= 40 && t.analysis.btcSafe);
 
   // Narrative aggregation
@@ -455,6 +632,21 @@ export default function App() {
       const pumping = d.changes.filter(c => c > 5).length;
       return { name, avg, pumping, total: d.count, hot: pumping >= 2 || avg > 4 };
     }).sort((a, b) => b.avg - a.avg);
+  }, [altResults]);
+
+  const concentrationWarnings = useMemo(() => {
+    const narrativeSetups = {};
+    altResults.forEach(t => {
+      if (t.analysis && t.analysis.score >= 40 && t.analysis.btcSafe) {
+        (t.narrative || []).forEach(n => {
+          if (!narrativeSetups[n]) narrativeSetups[n] = [];
+          narrativeSetups[n].push(t.name);
+        });
+      }
+    });
+    return Object.entries(narrativeSetups)
+      .filter(([, tokens]) => tokens.length >= 3)
+      .map(([narrative, tokens]) => ({ narrative, tokens, count: tokens.length }));
   }, [altResults]);
 
   return (
@@ -532,7 +724,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ── Narrative Heat ── */}
+        {/* ── Narrative Trends (Binance-wide) ── */}
         {narrativeHeat.length > 0 && (
           <div className="card" style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10, padding: "0 2px" }}>
             {narrativeHeat.map(n => (
@@ -585,8 +777,34 @@ export default function App() {
           </div>
         )}
 
-        {/* ── Sort ── */}
-        <div style={{ display: "flex", gap: 6, marginBottom: 10, overflowX: "auto", paddingBottom: 2 }}>
+        {/* ── Concentration Warning ── */}
+        {!loading && concentrationWarnings.length > 0 && (
+          <div className="card" style={{ background: "#12121e", border: "1px solid #92400e40", borderRadius: 12, padding: 12, marginBottom: 10 }}>
+            <div style={{ fontSize: 10, fontWeight: 800, color: "#fbbf24", letterSpacing: 1.5, marginBottom: 4 }}>
+              CONCENTRATION RISK
+            </div>
+            {concentrationWarnings.map(w => (
+              <div key={w.narrative} style={{ fontSize: 11, color: "#94a3b8", padding: "2px 0" }}>
+                <span style={{ color: "#fbbf24" }}>{w.narrative}</span>: {w.count} setups active ({w.tokens.join(", ")}) — consider limiting exposure
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ── View Filter + Sort ── */}
+        <div style={{ display: "flex", gap: 6, marginBottom: 10, overflowX: "auto", paddingBottom: 2, alignItems: "center" }}>
+          {/* Watchlist filter toggle */}
+          <div style={{ display: "flex", borderRadius: 6, overflow: "hidden", flexShrink: 0, border: "1px solid #1e1e2e" }}>
+            {[["all", "ALL"], ["watched", `★ ${watchlist.size}`]].map(([val, label]) => (
+              <button key={val} onClick={() => setViewFilter(val)} style={{
+                background: viewFilter === val ? (val === "watched" ? "#854d0e" : "#818cf8") : "#12121e",
+                color: viewFilter === val ? "#fff" : "#6b7280",
+                border: "none", padding: "5px 10px", fontSize: 11, fontWeight: 700,
+                cursor: "pointer", whiteSpace: "nowrap",
+              }}>{label}</button>
+            ))}
+          </div>
+          <div style={{ width: 1, height: 18, background: "#1e1e2e", flexShrink: 0 }} />
           {[["score", "Score"], ["rsi", "RSI ↓"], ["volume", "Vol ↑"], ["change", "24H ↑"]].map(([val, label]) => (
             <button key={val} onClick={() => setSortBy(val)} style={{
               background: sortBy === val ? "#818cf8" : "#12121e",
@@ -599,12 +817,21 @@ export default function App() {
         </div>
 
         {/* ── Loading State ── */}
-        {loading && sorted.length === 0 && Array.from({ length: 6 }).map((_, i) => (
+        {loading && displayed.length === 0 && Array.from({ length: 6 }).map((_, i) => (
           <div key={i} className="shimmer" style={{ height: 110, marginBottom: 8 }} />
         ))}
 
+        {/* Watched empty state */}
+        {!loading && viewFilter === "watched" && watchlist.size === 0 && (
+          <div className="card" style={{ background: "#12121e", border: "1px solid #1e1e2e", borderRadius: 12, padding: 14, marginBottom: 10, textAlign: "center" }}>
+            <div style={{ fontSize: 24, marginBottom: 6 }}>★</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#94a3b8" }}>No watched tokens</div>
+            <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>Tap the ★ on any token card to add it to your watchlist.</div>
+          </div>
+        )}
+
         {/* ── Token Cards ── */}
-        {sorted.map(({ symbol, name, narrative, analysis }, idx) => {
+        {displayed.map(({ symbol, name, narrative, analysis }, idx) => {
           if (!analysis) return null;
           const isExpanded = expanded === symbol;
           const isGood = analysis.score >= 40 && analysis.btcSafe;
@@ -636,11 +863,18 @@ export default function App() {
                         {narrative && narrative.length > 0 && <NarrativeTags narratives={narrative} />}
                       </div>
                     </div>
-                    <div style={{ textAlign: "right", flexShrink: 0 }}>
-                      <div style={{ fontSize: 16, fontWeight: 800, fontFamily: "var(--mono)" }}>${fp(analysis.currentPrice)}</div>
-                      <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: analysis.change24h >= 0 ? "#4ade80" : "#f87171", fontWeight: 700 }}>
-                        {analysis.change24h >= 0 ? "+" : ""}{analysis.change24h.toFixed(2)}%
+                    <div style={{ display: "flex", alignItems: "flex-start", gap: 8, flexShrink: 0 }}>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontSize: 16, fontWeight: 800, fontFamily: "var(--mono)" }}>${fp(analysis.currentPrice)}</div>
+                        <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: analysis.change24h >= 0 ? "#4ade80" : "#f87171", fontWeight: 700 }}>
+                          {analysis.change24h >= 0 ? "+" : ""}{analysis.change24h.toFixed(2)}%
+                        </div>
                       </div>
+                      <button onClick={(e) => { e.stopPropagation(); toggleWatch(symbol); }} style={{
+                        background: "none", border: "none", cursor: "pointer", padding: "2px 0 0",
+                        fontSize: 18, color: watchlist.has(symbol) ? "#fbbf24" : "#2a2a3e",
+                        transition: "color 0.2s", lineHeight: 1,
+                      }}>★</button>
                     </div>
                   </div>
 
@@ -658,11 +892,14 @@ export default function App() {
                       }}>{analysis.volRatio.toFixed(2)}x</span>
                     </div>
                     <div>
-                      <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1.2, marginBottom: 3 }}>SCORE</div>
-                      <span style={{
-                        fontFamily: "var(--mono)", fontSize: 16, fontWeight: 900,
-                        color: analysis.score >= 60 ? "#22c55e" : analysis.score >= 40 ? "#fbbf24" : analysis.score >= 20 ? "#f97316" : "#ef4444",
-                      }}>{analysis.score}</span>
+                      <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1.2, marginBottom: 3 }}>SIGNAL</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{
+                          fontFamily: "var(--mono)", fontSize: 16, fontWeight: 900,
+                          color: analysis.score >= 60 ? "#22c55e" : analysis.score >= 40 ? "#fbbf24" : analysis.score >= 20 ? "#f97316" : "#ef4444",
+                        }}>{analysis.score}</span>
+                        <SignalStrength score={analysis.score} />
+                      </div>
                     </div>
                   </div>
 
@@ -686,12 +923,17 @@ export default function App() {
                     </div>
 
                     {/* Grid Data */}
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10, marginBottom: 14 }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 14 }}>
                       {[
                         ["RSI 4H", analysis.rsi4h?.toFixed(1) || "—", null],
                         ["vs EMA200", `${analysis.priceVsEMA > 0 ? "+" : ""}${analysis.priceVsEMA.toFixed(1)}%`, analysis.priceVsEMA > 0 ? "#4ade80" : "#f87171"],
+                        ["Trend", analysis.inUptrend ? "UP" : "DOWN", analysis.inUptrend ? "#4ade80" : "#f87171"],
+                        ["MACD", analysis.macd ? (analysis.macd.bullishCross ? "Bull Cross" : analysis.macd.bearishCross ? "Bear Cross" : analysis.macd.rising ? "Rising" : "Falling") : "—", analysis.macd?.rising ? "#4ade80" : "#f87171"],
+                        ["BB", analysis.bb ? (analysis.bb.squeeze ? "SQUEEZE" : `${(analysis.bb.percentB * 100).toFixed(0)}%`) : "—", analysis.bb?.squeeze ? "#fbbf24" : null],
                         ["Pattern", analysis.pattern.split(" ")[0], analysis.bullish ? "#4ade80" : "#f87171"],
                         ["FVG", analysis.fvg.found ? (analysis.fvg.inZone ? "In Zone" : "Near") : "None", analysis.fvg.found ? "#fbbf24" : "#6b7280"],
+                        ["ROC", `${analysis.roc.toFixed(1)}%`, analysis.roc > 0 ? "#4ade80" : "#f87171"],
+                        ["Vol Spike", analysis.isVolumeClimax ? analysis.volContext : "Normal", analysis.volContext === "accumulation" ? "#4ade80" : analysis.volContext === "distribution" ? "#f87171" : null],
                       ].map(([label, val, color]) => (
                         <div key={label}>
                           <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1 }}>{label}</div>
@@ -737,7 +979,7 @@ export default function App() {
                         </div>
                         <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 8, fontFamily: "var(--mono)" }}>
                           Risk: <span style={{ color: "#f87171" }}>{analysis.riskPct.toFixed(2)}%</span>
-                          {" · R:R ≈ "}<span style={{ color: "#4ade80" }}>{(3.5 / analysis.riskPct).toFixed(1)}:1</span>
+                          {" · R:R ≈ "}<span style={{ color: "#4ade80" }}>{analysis.rrRatio.toFixed(1)}:1</span>
                           {" · Max hold: "}<span style={{ color: "#fbbf24" }}>48H</span>
                         </div>
                       </div>
