@@ -176,6 +176,103 @@ function detectFVG(candles) {
   return { found: false };
 }
 
+// ─── Session + Liquidity Analysis ────────────────────────────────
+// Sessions in UTC: Asian 00:00-08:00 · London 08:00-16:00 · US 13:00-22:00
+function getSessionInfo() {
+  const now = new Date();
+  const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const inAsian   = utcMins < 480;                          // 00:00–08:00
+  const inLondon  = utcMins >= 480 && utcMins < 960;        // 08:00–16:00
+  const inUS      = utcMins >= 780 && utcMins < 1320;       // 13:00–22:00
+  const inOverlap = inLondon && inUS;
+
+  let session, sessionColor;
+  if (inOverlap)     { session = "LONDON/US"; sessionColor = "#f97316"; }
+  else if (inLondon) { session = "LONDON";    sessionColor = "#60a5fa"; }
+  else if (inUS)     { session = "US";        sessionColor = "#22c55e"; }
+  else if (inAsian)  { session = "ASIAN";     sessionColor = "#a78bfa"; }
+  else               { session = "OFF-HOURS"; sessionColor = "#6b7280"; }
+
+  // Time to next major session open
+  let nextSession, minsToNext;
+  if (utcMins < 480)      { nextSession = "London"; minsToNext = 480  - utcMins; }
+  else if (utcMins < 780) { nextSession = "US";     minsToNext = 780  - utcMins; }
+  else                    { nextSession = "Asian";  minsToNext = 1440 - utcMins; }
+
+  const inDangerWindow        = minsToNext <= 30;
+  const sessionTransitionRisk = inAsian && minsToNext <= 120; // within 2h of London open
+
+  return {
+    session, sessionColor, nextSession, minsToNext,
+    inAsian, inLondon, inUS, inOverlap,
+    inDangerWindow, sessionTransitionRisk,
+    hoursToNext:   Math.floor(minsToNext / 60),
+    minsRemaining: minsToNext % 60,
+  };
+}
+
+// Extract the high/low range formed during the most recent Asian session candles
+function detectAsianRange(candles1h) {
+  if (!candles1h || candles1h.length < 4) return null;
+  const byDay = {};
+  candles1h.slice(-50).forEach(c => {
+    const d = new Date(c[0]);
+    if (d.getUTCHours() < 8) {
+      const key = `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
+      if (!byDay[key]) byDay[key] = [];
+      byDay[key].push(c);
+    }
+  });
+  const days = Object.keys(byDay).sort().reverse();
+  if (!days.length) return null;
+  const ac = byDay[days[0]];
+  if (ac.length < 2) return null;
+  const high = Math.max(...ac.map(c => parseFloat(c[2])));
+  const low  = Math.min(...ac.map(c => parseFloat(c[3])));
+  const rangePct = low > 0 ? ((high - low) / low) * 100 : 0;
+  return { high, low, rangePct, isTight: rangePct < 1.5, candleCount: ac.length };
+}
+
+// Detect stop hunt / liquidity sweep patterns in the last 5 candles
+// A sweep = wick penetrates a key level but the candle BODY closes back past it → stops grabbed, reversal likely
+function detectLiquiditySweep(candles, supports, resistances, asianRange) {
+  if (!candles || candles.length < 5) return { detected: false, type: "none" };
+  const results = [];
+  candles.slice(-5).forEach(candle => {
+    const o = parseFloat(candle[1]), h = parseFloat(candle[2]);
+    const l = parseFloat(candle[3]), c = parseFloat(candle[4]);
+    const body       = Math.abs(c - o) || 0.0001;
+    const lowerWick  = Math.min(o, c) - l;
+    const upperWick  = h - Math.max(o, c);
+
+    // Bullish: wick pierces support but body closes back above it
+    if (supports.length > 0) {
+      const s = supports[0];
+      if (l < s && c > s && lowerWick > body * 1.5)
+        results.push({ type: "bullish_sweep", label: "Stop Hunt Below Support", level: s, bullish: true });
+    }
+    // Bearish: wick pierces resistance but body closes back below it
+    if (resistances.length > 0) {
+      const r = resistances[0];
+      if (h > r && c < r && upperWick > body * 1.5)
+        results.push({ type: "bearish_sweep", label: "Stop Hunt Above Resistance", level: r, bullish: false });
+    }
+    // Asian range sweeps — classic session-open manipulation
+    if (asianRange) {
+      if (l < asianRange.low  && c > asianRange.low  && lowerWick > body)
+        results.push({ type: "asian_low_sweep",  label: "Asian Low Swept — Bullish Reversal",  level: asianRange.low,  bullish: true });
+      if (h > asianRange.high && c < asianRange.high && upperWick > body)
+        results.push({ type: "asian_high_sweep", label: "Asian High Swept — Bearish Reversal", level: asianRange.high, bullish: false });
+    }
+  });
+  if (!results.length) return { detected: false, type: "none" };
+  const bullish = results.filter(r => r.bullish);
+  const bearish = results.filter(r => !r.bullish);
+  return bullish.length
+    ? { ...bullish[bullish.length - 1], detected: true }
+    : { ...bearish[bearish.length - 1], detected: true };
+}
+
 // ─── Scoring Engine ──────────────────────────────────────────────
 function scoreToken(data, btcData) {
   const { candles1h, candles4h } = data;
@@ -199,6 +296,11 @@ function scoreToken(data, btcData) {
   const { pattern, bullish } = detectCandlePattern(candles1h);
   const { supports, resistances, nearSupport } = findSupportResistance(candles1h);
   const fvg = detectFVG(candles1h);
+
+  // Session + liquidity sweep
+  const sessionInfo    = getSessionInfo();
+  const asianRange     = detectAsianRange(candles1h);
+  const liquiditySweep = detectLiquiditySweep(candles1h, supports, resistances, asianRange);
 
   // New indicators
   const macd = calcMACD(closes1h);
@@ -298,6 +400,23 @@ function scoreToken(data, btcData) {
   // ── BTC risk ──
   if (!btcSafe) { score -= 40; reasons.push(`⛔ BTC risk-off (${btcChange4h.toFixed(1)}% on 4H)`); }
 
+  // ── Liquidity sweep ──
+  if (liquiditySweep.detected && liquiditySweep.bullish) {
+    score += 15; reasons.push(`Liquidity sweep: ${liquiditySweep.label}`);
+  }
+  if (liquiditySweep.detected && !liquiditySweep.bullish) {
+    score -= 15; reasons.push(`Liquidity sweep: ${liquiditySweep.label}`);
+  }
+
+  // ── Session risk ──
+  if (sessionInfo.sessionTransitionRisk) {
+    score -= 10;
+    reasons.push(`Session risk: ${sessionInfo.nextSession} open in ${sessionInfo.minsToNext}min — stop hunt likely`);
+  }
+  if (asianRange?.isTight && sessionInfo.inAsian) {
+    reasons.push(`Asian range tight (${asianRange.rangePct.toFixed(2)}%) — big move expected at session open`);
+  }
+
   // ── Setup detection ──
   if (rsi1h >= 30 && rsi1h <= 40 && nearSupport && bullish && volRatio > 0.8 && btcSafe) {
     setupType = "A: RSI + Structure"; score += 10;
@@ -318,6 +437,13 @@ function scoreToken(data, btcData) {
   const rewardPct = ((tp1 - currentPrice) / currentPrice) * 100;
   const rrRatio = riskPct > 0 ? rewardPct / riskPct : 0;
 
+  // Session-adjusted stop — wider to survive Asian low sweep before the real move
+  let sessionAdjustedStop = stopLoss;
+  if (asianRange && (sessionInfo.inAsian || sessionInfo.sessionTransitionRisk)) {
+    const asianBuffer = asianRange.low * 0.995;
+    if (asianBuffer < stopLoss) sessionAdjustedStop = asianBuffer;
+  }
+
   return {
     rsi1h, rsi4h, currentPrice, ema200: currentEMA200, priceVsEMA,
     volRatio, pattern, bullish, supports, resistances, nearSupport,
@@ -326,6 +452,7 @@ function scoreToken(data, btcData) {
     entry: setupType !== "None" && btcSafe,
     macd, inUptrend, trendStrength, atr, bb, roc, momentumImproving,
     volSpike, volContext, isVolumeClimax,
+    sessionInfo, asianRange, liquiditySweep, sessionAdjustedStop,
   };
 }
 
@@ -617,6 +744,8 @@ export default function App() {
 
   const shortlist = sorted.filter(t => t.analysis && t.analysis.score >= 40 && t.analysis.btcSafe);
 
+  const sessionInfo = getSessionInfo();
+
   // Narrative aggregation
   const narrativeHeat = useMemo(() => {
     const map = {};
@@ -673,11 +802,18 @@ export default function App() {
             <h1 style={{ fontSize: 17, fontWeight: 900, letterSpacing: "-0.03em" }}>
               <span style={{ color: "#818cf8" }}>◈</span> PLAYBOOK SCANNER
             </h1>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2, flexWrap: "wrap" }}>
               <span style={{ fontSize: 10, color: "#6b7280", fontFamily: "var(--mono)" }}>
                 {lastUpdate ? lastUpdate.toLocaleTimeString() : "—"}
               </span>
               {autoRefresh && <span style={{ fontSize: 9, color: "#4ade80", fontWeight: 600 }}>● AUTO</span>}
+              <span style={{ width: 1, height: 10, background: "#2a2a3e", display: "inline-block" }} />
+              <span style={{ fontSize: 9, fontWeight: 700, color: sessionInfo.sessionColor, letterSpacing: 0.5 }}>
+                ● {sessionInfo.session}
+              </span>
+              <span style={{ fontSize: 9, color: sessionInfo.inDangerWindow ? "#fb923c" : "#4b5563" }}>
+                ⏱ {sessionInfo.nextSession} in {sessionInfo.hoursToNext > 0 ? `${sessionInfo.hoursToNext}h ` : ""}{sessionInfo.minsRemaining}m
+              </span>
             </div>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
@@ -777,6 +913,30 @@ export default function App() {
           </div>
         )}
 
+        {/* ── Session Danger Warning ── */}
+        {!loading && (sessionInfo.inDangerWindow || sessionInfo.sessionTransitionRisk) && (
+          <div className="card" style={{
+            background: "#12121e",
+            border: `1px solid ${sessionInfo.inDangerWindow ? "#c2410c70" : "#92400e50"}`,
+            borderRadius: 12, padding: 12, marginBottom: 10,
+          }}>
+            <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.5, marginBottom: 5,
+              color: sessionInfo.inDangerWindow ? "#fb923c" : "#fbbf24" }}>
+              {sessionInfo.inDangerWindow ? "⚡ DANGER WINDOW" : "⚠ SESSION TRANSITION RISK"}
+            </div>
+            <div style={{ fontSize: 11, color: "#94a3b8", lineHeight: 1.6 }}>
+              <span style={{ color: sessionInfo.inDangerWindow ? "#fb923c" : "#fbbf24", fontWeight: 700 }}>
+                {sessionInfo.nextSession} session
+              </span>{" opens in "}
+              <span style={{ fontFamily: "var(--mono)", fontWeight: 700,
+                color: sessionInfo.inDangerWindow ? "#fb923c" : "#fbbf24" }}>
+                {sessionInfo.hoursToNext > 0 ? `${sessionInfo.hoursToNext}h ` : ""}{sessionInfo.minsRemaining}min
+              </span>
+              {". Asian session stops may be swept before the real move. Use wider stops or wait for the liquidity grab candle to close before entering."}
+            </div>
+          </div>
+        )}
+
         {/* ── Concentration Warning ── */}
         {!loading && concentrationWarnings.length > 0 && (
           <div className="card" style={{ background: "#12121e", border: "1px solid #92400e40", borderRadius: 12, padding: 12, marginBottom: 10 }}>
@@ -857,6 +1017,20 @@ export default function App() {
                         {hasSetup && (
                           <span style={{ background: "#166534", color: "#4ade80", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 800, letterSpacing: 1 }}>SETUP</span>
                         )}
+                        {analysis.liquiditySweep?.detected && (
+                          <span style={{
+                            background: analysis.liquiditySweep.bullish ? "#14532d" : "#7f1d1d",
+                            color: analysis.liquiditySweep.bullish ? "#86efac" : "#fca5a5",
+                            padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 800, letterSpacing: 1,
+                          }}>
+                            {analysis.liquiditySweep.bullish ? "SWEEP ↑" : "SWEEP ↓"}
+                          </span>
+                        )}
+                        {analysis.sessionInfo?.sessionTransitionRisk && (
+                          <span style={{ background: "#431407", color: "#fb923c", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 800, letterSpacing: 1 }}>
+                            SESSION RISK
+                          </span>
+                        )}
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
                         <span style={{ fontSize: 11, color: analysis.setupType !== "None" ? "#fbbf24" : "#4b5563", fontWeight: 600 }}>{analysis.setupType}</span>
@@ -934,6 +1108,8 @@ export default function App() {
                         ["FVG", analysis.fvg.found ? (analysis.fvg.inZone ? "In Zone" : "Near") : "None", analysis.fvg.found ? "#fbbf24" : "#6b7280"],
                         ["ROC", `${analysis.roc.toFixed(1)}%`, analysis.roc > 0 ? "#4ade80" : "#f87171"],
                         ["Vol Spike", analysis.isVolumeClimax ? analysis.volContext : "Normal", analysis.volContext === "accumulation" ? "#4ade80" : analysis.volContext === "distribution" ? "#f87171" : null],
+                        ["Session", analysis.sessionInfo?.session || "—", analysis.sessionInfo?.sessionColor || null],
+                        ["Liquidity", analysis.liquiditySweep?.detected ? (analysis.liquiditySweep.bullish ? "Sweep ↑" : "Sweep ↓") : "None", analysis.liquiditySweep?.detected ? (analysis.liquiditySweep.bullish ? "#86efac" : "#fca5a5") : "#4b5563"],
                       ].map(([label, val, color]) => (
                         <div key={label}>
                           <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1 }}>{label}</div>
@@ -960,6 +1136,46 @@ export default function App() {
                       </div>
                     </div>
 
+                    {/* Asian Range + Sweep Detail */}
+                    {analysis.asianRange && (
+                      <div style={{ marginBottom: 14 }}>
+                        <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 800, letterSpacing: 1.5, marginBottom: 6 }}>ASIAN SESSION RANGE</div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 6 }}>
+                          <div>
+                            <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1, marginBottom: 2 }}>ASIAN HIGH</div>
+                            <div style={{ fontSize: 12, color: "#fb923c", fontFamily: "var(--mono)", fontWeight: 600 }}>${fp(analysis.asianRange.high)}</div>
+                          </div>
+                          <div>
+                            <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1, marginBottom: 2 }}>ASIAN LOW</div>
+                            <div style={{ fontSize: 12, color: "#a78bfa", fontFamily: "var(--mono)", fontWeight: 600 }}>${fp(analysis.asianRange.low)}</div>
+                          </div>
+                          <div>
+                            <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1, marginBottom: 2 }}>RANGE</div>
+                            <div style={{ fontSize: 12, color: analysis.asianRange.isTight ? "#fbbf24" : "#94a3b8", fontFamily: "var(--mono)", fontWeight: 600 }}>
+                              {analysis.asianRange.rangePct.toFixed(2)}% {analysis.asianRange.isTight ? "— TIGHT" : ""}
+                            </div>
+                          </div>
+                          <div>
+                            <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1, marginBottom: 2 }}>CANDLES</div>
+                            <div style={{ fontSize: 12, color: "#94a3b8", fontFamily: "var(--mono)", fontWeight: 600 }}>{analysis.asianRange.candleCount}H</div>
+                          </div>
+                        </div>
+                        {analysis.liquiditySweep?.detected && (
+                          <div style={{
+                            padding: "7px 10px", borderRadius: 7, fontSize: 11, fontWeight: 600, lineHeight: 1.5,
+                            background: analysis.liquiditySweep.bullish ? "rgba(20,83,45,0.3)" : "rgba(127,29,29,0.3)",
+                            border: `1px solid ${analysis.liquiditySweep.bullish ? "#16653450" : "#7f1d1d50"}`,
+                            color: analysis.liquiditySweep.bullish ? "#86efac" : "#fca5a5",
+                          }}>
+                            {analysis.liquiditySweep.bullish ? "↑" : "↓"} {analysis.liquiditySweep.label}
+                            {analysis.liquiditySweep.level
+                              ? <span style={{ color: "#94a3b8", fontWeight: 400 }}> @ ${fp(analysis.liquiditySweep.level)}</span>
+                              : null}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     {/* Trade Levels */}
                     {hasSetup && (
                       <div style={{ background: "rgba(22,101,52,0.2)", border: "1px solid #16653440", borderRadius: 10, padding: 12 }}>
@@ -977,6 +1193,16 @@ export default function App() {
                             </div>
                           ))}
                         </div>
+                        {analysis.sessionAdjustedStop !== analysis.stopLoss && (
+                          <div style={{ marginTop: 8, padding: "7px 10px", borderRadius: 7,
+                            background: "rgba(251,146,60,0.08)", border: "1px solid #fb923c30" }}>
+                            <div style={{ fontSize: 9, color: "#fb923c", fontWeight: 800, letterSpacing: 1 }}>SESSION-ADJUSTED STOP</div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 3 }}>
+                              <span style={{ fontSize: 13, color: "#fb923c", fontFamily: "var(--mono)", fontWeight: 700 }}>${fp(analysis.sessionAdjustedStop)}</span>
+                              <span style={{ fontSize: 10, color: "#6b7280" }}>wider stop to survive Asian sweep</span>
+                            </div>
+                          </div>
+                        )}
                         <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 8, fontFamily: "var(--mono)" }}>
                           Risk: <span style={{ color: "#f87171" }}>{analysis.riskPct.toFixed(2)}%</span>
                           {" · R:R ≈ "}<span style={{ color: "#4ade80" }}>{analysis.rrRatio.toFixed(1)}:1</span>
