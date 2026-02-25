@@ -456,6 +456,97 @@ function scoreToken(data, btcData) {
   };
 }
 
+// ─── AI Export ───────────────────────────────────────────────────
+function buildExportPayload(symbol, name, narrative, analysis, btcAnalysis) {
+  const a = analysis;
+  return {
+    _instruction: "Analyze this token setup. Ask me for 1H and 4H chart screenshots if the setup looks strong. Focus on whether this is a valid entry or if I should wait.",
+    token: { symbol: symbol.replace("USDT", ""), pair: symbol, name, narratives: narrative || [] },
+    scanTime: new Date().toISOString(),
+    session: {
+      current: a.sessionInfo?.session,
+      nextOpen: a.sessionInfo?.nextSession,
+      minsToNext: a.sessionInfo?.minsToNext,
+      dangerWindow: a.sessionInfo?.inDangerWindow,
+      transitionRisk: a.sessionInfo?.sessionTransitionRisk,
+    },
+    btc: {
+      safe: a.btcSafe,
+      change4h: +a.btcChange4h.toFixed(2),
+      price: btcAnalysis?.currentPrice || null,
+      rsi1h: btcAnalysis?.rsi1h ? +btcAnalysis.rsi1h.toFixed(1) : null,
+    },
+    price: {
+      current: a.currentPrice,
+      change24h: +a.change24h.toFixed(2),
+      vsEMA200: +a.priceVsEMA.toFixed(2),
+    },
+    indicators: {
+      rsi1h: a.rsi1h ? +a.rsi1h.toFixed(1) : null,
+      rsi4h: a.rsi4h ? +a.rsi4h.toFixed(1) : null,
+      macd: a.macd ? {
+        histogram: +a.macd.histogram.toFixed(6),
+        bullishCross: a.macd.bullishCross,
+        bearishCross: a.macd.bearishCross,
+        rising: a.macd.rising,
+      } : null,
+      bollingerBands: a.bb ? {
+        percentB: +a.bb.percentB.toFixed(3),
+        squeeze: a.bb.squeeze,
+        bandwidth: +a.bb.bandwidth.toFixed(2),
+      } : null,
+      atr: a.atr ? +a.atr.toFixed(6) : null,
+      roc: +a.roc.toFixed(2),
+      momentumImproving: a.momentumImproving,
+    },
+    trend: {
+      direction: a.inUptrend ? "UP" : "DOWN",
+      ema20vsEma50: +a.trendStrength.toFixed(2),
+    },
+    volume: {
+      ratio: +a.volRatio.toFixed(2),
+      spike: +a.volSpike.toFixed(2),
+      climax: a.isVolumeClimax,
+      context: a.volContext,
+    },
+    structure: {
+      pattern: a.pattern,
+      bullishCandle: a.bullish,
+      nearSupport: a.nearSupport,
+      supports: a.supports.map(s => +s.toFixed(6)),
+      resistances: a.resistances.map(r => +r.toFixed(6)),
+      fvg: a.fvg.found ? { inZone: a.fvg.inZone, high: a.fvg.high, low: a.fvg.low } : null,
+    },
+    asianRange: a.asianRange ? {
+      high: a.asianRange.high,
+      low: a.asianRange.low,
+      rangePct: +a.asianRange.rangePct.toFixed(2),
+      tight: a.asianRange.isTight,
+    } : null,
+    liquiditySweep: a.liquiditySweep?.detected ? {
+      type: a.liquiditySweep.type,
+      label: a.liquiditySweep.label,
+      level: a.liquiditySweep.level,
+      bullish: a.liquiditySweep.bullish,
+    } : null,
+    setup: {
+      type: a.setupType,
+      score: a.score,
+      entry: a.entry,
+      reasons: a.reasons,
+    },
+    tradeLevels: {
+      entry: a.currentPrice,
+      stopLoss: a.stopLoss,
+      sessionAdjustedStop: a.sessionAdjustedStop !== a.stopLoss ? a.sessionAdjustedStop : null,
+      tp1: a.tp1,
+      tp2: a.tp2,
+      riskPct: +a.riskPct.toFixed(2),
+      rrRatio: +a.rrRatio.toFixed(2),
+    },
+  };
+}
+
 // ─── Components ──────────────────────────────────────────────────
 function MiniChart({ candles, width = 300, height = 80 }) {
   const canvasRef = useRef(null);
@@ -660,6 +751,9 @@ export default function App() {
     catch { return new Set(); }
   });
   const [viewFilter, setViewFilter] = useState("all"); // "all" | "watched"
+  const [copied, setCopied] = useState(null); // symbol of last copied token
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState(new Set());
   const timerRef = useRef(null);
 
   const toggleWatch = (symbol) => {
@@ -669,6 +763,31 @@ export default function App() {
       localStorage.setItem("pb_watchlist", JSON.stringify([...next]));
       return next;
     });
+  };
+
+  const toggleSelect = (symbol) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(symbol)) next.delete(symbol); else next.add(symbol);
+      return next;
+    });
+  };
+
+  const copySelected = () => {
+    const tokens = displayed.filter(t => selected.has(t.symbol) && t.analysis);
+    if (!tokens.length) return;
+    const payload = {
+      _instruction: "Analyze these token setups together. Compare which has the strongest setup and best R:R. Ask me for chart screenshots (1H + 4H) of the top picks before confirming entries.",
+      scanTime: new Date().toISOString(),
+      session: (() => { const s = getSessionInfo(); return { current: s.session, nextOpen: s.nextSession, minsToNext: s.minsToNext, dangerWindow: s.inDangerWindow, transitionRisk: s.sessionTransitionRisk }; })(),
+      btc: btcAnalysis ? { safe: btcAnalysis.btcSafe, change4h: +btcAnalysis.btcChange4h.toFixed(2), price: btcAnalysis.currentPrice, rsi1h: btcAnalysis.rsi1h ? +btcAnalysis.rsi1h.toFixed(1) : null } : null,
+      tokens: tokens.map(t => buildExportPayload(t.symbol, t.name, t.narrative, t.analysis, btcAnalysis)),
+    };
+    // Remove redundant btc/session/scanTime from individual tokens since they're at top level
+    payload.tokens.forEach(t => { delete t._instruction; delete t.scanTime; delete t.session; delete t.btc; });
+    navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+    setCopied("__multi__");
+    setTimeout(() => setCopied(null), 2000);
   };
 
   const saveTokens = (altList) => {
@@ -965,6 +1084,14 @@ export default function App() {
             ))}
           </div>
           <div style={{ width: 1, height: 18, background: "#1e1e2e", flexShrink: 0 }} />
+          <button onClick={() => { setSelectMode(p => !p); if (selectMode) setSelected(new Set()); }} style={{
+            background: selectMode ? "#312e81" : "#12121e",
+            color: selectMode ? "#a5b4fc" : "#6b7280",
+            border: `1px solid ${selectMode ? "#818cf8" : "#1e1e2e"}`,
+            padding: "5px 10px", borderRadius: 6, fontSize: 11, fontWeight: 700,
+            cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0,
+          }}>{selectMode ? `✓ ${selected.size}` : "SELECT"}</button>
+          <div style={{ width: 1, height: 18, background: "#1e1e2e", flexShrink: 0 }} />
           {[["score", "Score"], ["rsi", "RSI ↓"], ["volume", "Vol ↑"], ["change", "24H ↑"]].map(([val, label]) => (
             <button key={val} onClick={() => setSortBy(val)} style={{
               background: sortBy === val ? "#818cf8" : "#12121e",
@@ -996,12 +1123,13 @@ export default function App() {
           const isExpanded = expanded === symbol;
           const isGood = analysis.score >= 40 && analysis.btcSafe;
           const hasSetup = analysis.entry;
-          const bc = hasSetup ? "#22c55e50" : isGood ? "#818cf850" : "#1e1e2e";
+          const isSelected = selected.has(symbol);
+          const bc = selectMode && isSelected ? "#818cf8" : hasSetup ? "#22c55e50" : isGood ? "#818cf850" : "#1e1e2e";
 
           return (
             <div key={symbol} className="card" style={{ animationDelay: `${idx * 0.04}s`, marginBottom: 8 }}>
               <div
-                onClick={() => setExpanded(isExpanded ? null : symbol)}
+                onClick={() => selectMode ? toggleSelect(symbol) : setExpanded(isExpanded ? null : symbol)}
                 style={{
                   background: "#12121e", border: `1px solid ${bc}`, borderRadius: 12,
                   cursor: "pointer", overflow: "hidden", transition: "border-color 0.3s",
@@ -1012,6 +1140,15 @@ export default function App() {
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
                     <div style={{ minWidth: 0 }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        {selectMode && (
+                          <span style={{
+                            width: 18, height: 18, borderRadius: 4, flexShrink: 0,
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                            background: isSelected ? "#818cf8" : "transparent",
+                            border: `2px solid ${isSelected ? "#818cf8" : "#3a3a5e"}`,
+                            fontSize: 11, color: "#fff", fontWeight: 900, transition: "all 0.15s",
+                          }}>{isSelected ? "✓" : ""}</span>
+                        )}
                         <span style={{ fontSize: 15, fontWeight: 800 }}>{name}</span>
                         <span style={{ fontSize: 10, color: "#6b7280", fontFamily: "var(--mono)" }}>{symbol.replace("USDT", "")}</span>
                         {hasSetup && (
@@ -1210,6 +1347,27 @@ export default function App() {
                         </div>
                       </div>
                     )}
+
+                    {/* Export for AI */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const payload = buildExportPayload(symbol, name, narrative, analysis, btcAnalysis);
+                        navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+                        setCopied(symbol);
+                        setTimeout(() => setCopied(null), 2000);
+                      }}
+                      style={{
+                        width: "100%", marginTop: 14, padding: "10px 0", borderRadius: 8,
+                        background: copied === symbol ? "#166534" : "#1e1b4b",
+                        border: `1px solid ${copied === symbol ? "#22c55e50" : "#312e8180"}`,
+                        color: copied === symbol ? "#4ade80" : "#a5b4fc",
+                        fontSize: 12, fontWeight: 800, letterSpacing: 1.2, cursor: "pointer",
+                        transition: "all 0.2s",
+                      }}
+                    >
+                      {copied === symbol ? "COPIED — PASTE INTO AI" : "COPY FOR AI ANALYSIS"}
+                    </button>
                   </div>
                 )}
               </div>
@@ -1223,6 +1381,40 @@ export default function App() {
           <p style={{ marginTop: 2 }}>Binance public API · Auto-refresh 5min · Not financial advice</p>
         </div>
       </main>
+
+      {/* ── Multi-Select Action Bar ── */}
+      {selectMode && selected.size > 0 && (
+        <div style={{
+          position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 150,
+          background: "rgba(10,10,18,0.95)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+          borderTop: "1px solid #312e8180", padding: "12px 16px",
+        }}>
+          <div style={{ maxWidth: 600, margin: "0 auto", display: "flex", gap: 8, alignItems: "center" }}>
+            <div style={{ flex: 1, fontSize: 12, fontWeight: 700, color: "#a5b4fc" }}>
+              {selected.size} token{selected.size > 1 ? "s" : ""} selected
+            </div>
+            <button onClick={() => { setSelected(new Set()); }} style={{
+              background: "#1a1a2e", border: "1px solid #2a2a3e", color: "#6b7280",
+              padding: "8px 14px", borderRadius: 8, fontSize: 11, fontWeight: 700, cursor: "pointer",
+            }}>CLEAR</button>
+            <button onClick={() => {
+              const all = displayed.filter(t => t.analysis).map(t => t.symbol);
+              setSelected(new Set(all));
+            }} style={{
+              background: "#1a1a2e", border: "1px solid #2a2a3e", color: "#94a3b8",
+              padding: "8px 14px", borderRadius: 8, fontSize: 11, fontWeight: 700, cursor: "pointer",
+            }}>ALL</button>
+            <button onClick={copySelected} style={{
+              background: copied === "__multi__" ? "#166534" : "#818cf8",
+              border: "none", color: "#fff",
+              padding: "8px 18px", borderRadius: 8, fontSize: 12, fontWeight: 800, letterSpacing: 0.8,
+              cursor: "pointer", transition: "background 0.2s",
+            }}>
+              {copied === "__multi__" ? "COPIED!" : "COPY FOR AI"}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Settings */}
       {showSettings && <SettingsModal tokens={tokens} onSave={saveTokens} onClose={() => setShowSettings(false)} />}
