@@ -366,7 +366,7 @@ function scoreToken(data, btcData) {
   else { reasons.push("⚠ Low volume — weak conviction"); }
   if (isVolumeClimax && nearSupport) { score += 10; reasons.push("Volume climax at support — accumulation"); }
   else if (isVolumeClimax && nearResistance) { score -= 5; reasons.push("Volume climax at resistance — distribution risk"); }
-
+  
   // ── Candle patterns ──
   if (bullish && nearSupport) { score += 15; reasons.push(`${pattern} at support`); }
   else if (bullish) { score += 5; reasons.push(pattern); }
@@ -672,6 +672,122 @@ function NarrativeTags({ narratives }) {
   );
 }
 
+// ─── Trade Manager Component ─────────────────────────────────────
+function TradeManager({ symbol, currentPrice, trades, setTrades }) {
+  const trade = trades[symbol];
+  const [priceInput, setPriceInput] = useState(currentPrice);
+  const [capitalInput, setCapitalInput] = useState("");
+
+  const handleStartTrade = () => {
+    const p = parseFloat(priceInput);
+    const c = parseFloat(capitalInput);
+    if (!p || !c) return;
+    setTrades(prev => ({
+      ...prev,
+      [symbol]: {
+        isActive: true,
+        entries: [{ price: p, capital: c, date: new Date().toISOString() }],
+        totalCapital: c,
+        avgEntryPrice: p
+      }
+    }));
+    setCapitalInput("");
+  };
+
+  const handleDCA = () => {
+    const p = parseFloat(priceInput);
+    const c = parseFloat(capitalInput);
+    if (!p || !c || !trade) return;
+
+    const newEntries = [...trade.entries, { price: p, capital: c, date: new Date().toISOString() }];
+    const newTotalCapital = trade.totalCapital + c;
+    const totalTokens = newEntries.reduce((acc, entry) => acc + (entry.capital / entry.price), 0);
+    const newAvgPrice = newTotalCapital / totalTokens;
+
+    setTrades(prev => ({
+      ...prev,
+      [symbol]: {
+        ...prev[symbol],
+        entries: newEntries,
+        totalCapital: newTotalCapital,
+        avgEntryPrice: newAvgPrice
+      }
+    }));
+    setCapitalInput("");
+  };
+
+  const handleClose = () => {
+    setTrades(prev => {
+      const copy = { ...prev };
+      delete copy[symbol];
+      return copy;
+    });
+  };
+
+  // PNL Math
+  let pnlUsd = 0, pnlPct = 0, currentValue = 0, tokensOwned = 0;
+  if (trade?.isActive) {
+    tokensOwned = trade.totalCapital / trade.avgEntryPrice;
+    currentValue = tokensOwned * currentPrice;
+    pnlUsd = currentValue - trade.totalCapital;
+    pnlPct = (pnlUsd / trade.totalCapital) * 100;
+  }
+
+  return (
+    <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 14, background: "#1a1a2e", border: "1px solid #312e8180", borderRadius: 10, padding: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <span style={{ fontSize: 10, color: "#a5b4fc", fontWeight: 800, letterSpacing: 1.5 }}>💼 TRADE MANAGEMENT</span>
+        {trade?.isActive && (
+          <button onClick={handleClose} style={{ background: "#ef444420", color: "#f87171", border: "1px solid #ef444440", padding: "4px 8px", borderRadius: 6, fontSize: 9, fontWeight: 700, cursor: "pointer" }}>CLOSE TRADE</button>
+        )}
+      </div>
+
+      {!trade?.isActive ? (
+        <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 4 }}>ENTRY PRICE</div>
+            <input type="number" value={priceInput} onChange={e => setPriceInput(e.target.value)} style={{ width: "100%", background: "#12121e", border: "1px solid #2a2a3e", borderRadius: 6, padding: "8px", color: "#e2e8f0", fontSize: 13, fontFamily: "var(--mono)", outline: "none" }} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 4 }}>CAPITAL (USD)</div>
+            <input type="number" placeholder="0.00" value={capitalInput} onChange={e => setCapitalInput(e.target.value)} style={{ width: "100%", background: "#12121e", border: "1px solid #2a2a3e", borderRadius: 6, padding: "8px", color: "#e2e8f0", fontSize: 13, fontFamily: "var(--mono)", outline: "none" }} />
+          </div>
+          <div style={{ display: "flex", alignItems: "flex-end" }}>
+            <button onClick={handleStartTrade} style={{ background: "#818cf8", color: "#fff", border: "none", borderRadius: 6, padding: "8px 16px", fontWeight: 700, fontSize: 12, cursor: "pointer", height: 35 }}>START</button>
+          </div>
+        </div>
+      ) : (
+        <div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 14, paddingBottom: 14, borderBottom: "1px solid #2a2a3e" }}>
+            <div>
+              <div style={{ fontSize: 9, color: "#6b7280" }}>AVG ENTRY</div>
+              <div style={{ fontSize: 13, fontFamily: "var(--mono)", fontWeight: 700 }}>${fp(trade.avgEntryPrice)}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 9, color: "#6b7280" }}>INVESTED</div>
+              <div style={{ fontSize: 13, fontFamily: "var(--mono)", fontWeight: 700 }}>${trade.totalCapital.toFixed(2)}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 9, color: "#6b7280" }}>PNL</div>
+              <div style={{ fontSize: 13, fontFamily: "var(--mono)", fontWeight: 800, color: pnlUsd >= 0 ? "#4ade80" : "#f87171" }}>
+                {pnlUsd >= 0 ? "+" : ""}{pnlUsd.toFixed(2)} ({pnlPct.toFixed(2)}%)
+              </div>
+            </div>
+          </div>
+          
+          <div style={{ fontSize: 9, color: "#a5b4fc", marginBottom: 6, fontWeight: 700 }}>ADD DCA POSITION</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input type="number" placeholder="Price" value={priceInput} onChange={e => setPriceInput(e.target.value)} style={{ flex: 1, background: "#12121e", border: "1px solid #2a2a3e", borderRadius: 6, padding: "8px", color: "#e2e8f0", fontSize: 12, fontFamily: "var(--mono)", outline: "none" }} />
+            <input type="number" placeholder="Amount (USD)" value={capitalInput} onChange={e => setCapitalInput(e.target.value)} style={{ flex: 1, background: "#12121e", border: "1px solid #2a2a3e", borderRadius: 6, padding: "8px", color: "#e2e8f0", fontSize: 12, fontFamily: "var(--mono)", outline: "none" }} />
+            <button onClick={handleDCA} style={{ background: "#4ade8020", color: "#4ade80", border: "1px solid #4ade8040", borderRadius: 6, padding: "0 14px", fontWeight: 700, fontSize: 11, cursor: "pointer" }}>DCA</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 // ─── Settings Modal ──────────────────────────────────────────────
 function SettingsModal({ tokens, onSave, onClose }) {
   const [list, setList] = useState(tokens.filter(t => t.role === "alt"));
@@ -739,7 +855,12 @@ export default function App() {
     catch { return DEFAULT_TOKENS; }
   });
   const [data, setData] = useState({});
+  const [trades, setTrades] = useState(() => {
+    try { const saved = localStorage.getItem("pb_trades"); return saved ? JSON.parse(saved) : {}; }
+    catch { return {}; }
+  });
   const [loading, setLoading] = useState(true);
+  const [refreshingSymbol, setRefreshingSymbol] = useState(null); // specific token loader
   const [progress, setProgress] = useState(0);
   const [lastUpdate, setLastUpdate] = useState(null);
   const [sortBy, setSortBy] = useState("score");
@@ -756,6 +877,10 @@ export default function App() {
   const [selected, setSelected] = useState(new Set());
   const timerRef = useRef(null);
 
+  useEffect(() => {
+    localStorage.setItem("pb_trades", JSON.stringify(trades));
+  }, [trades]);
+
   const toggleWatch = (symbol) => {
     setWatchlist(prev => {
       const next = new Set(prev);
@@ -771,6 +896,32 @@ export default function App() {
       if (next.has(symbol)) next.delete(symbol); else next.add(symbol);
       return next;
     });
+  };
+
+  const fetchSingleToken = async (symbol) => {
+    try {
+      const [res1h, res4h] = await Promise.all([
+        fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1h&limit=210`),
+        fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=4h&limit=100`),
+      ]);
+      if (res1h.ok && res4h.ok) {
+        const [candles1h, candles4h] = await Promise.all([res1h.json(), res4h.json()]);
+        return { candles1h, candles4h };
+      }
+    } catch (e) { console.warn(`Failed: ${symbol}`, e); }
+    return null;
+  };
+
+  const refreshIndividualToken = async (symbol) => {
+    setRefreshingSymbol(symbol);
+    const token = tokens.find(t => t.symbol === symbol);
+    if (token) {
+      const res = await fetchSingleToken(symbol);
+      if (res) {
+        setData(prev => ({ ...prev, [symbol]: { ...res, ...token } }));
+      }
+    }
+    setRefreshingSymbol(null);
   };
 
   const copySelected = () => {
@@ -804,16 +955,10 @@ export default function App() {
     const total = tokens.length;
     for (let idx = 0; idx < total; idx++) {
       const token = tokens[idx];
-      try {
-        const [res1h, res4h] = await Promise.all([
-          fetch(`https://api.binance.com/api/v3/klines?symbol=${token.symbol}&interval=1h&limit=210`),
-          fetch(`https://api.binance.com/api/v3/klines?symbol=${token.symbol}&interval=4h&limit=100`),
-        ]);
-        if (res1h.ok && res4h.ok) {
-          const [candles1h, candles4h] = await Promise.all([res1h.json(), res4h.json()]);
-          results[token.symbol] = { candles1h, candles4h, ...token };
-        }
-      } catch (e) { console.warn(`Failed: ${token.symbol}`, e); }
+      const res = await fetchSingleToken(token.symbol);
+      if (res) {
+        results[token.symbol] = { ...res, ...token };
+      }
       setProgress(Math.round(((idx + 1) / total) * 100));
       if (idx < total - 1) await new Promise(r => setTimeout(r, 100));
     }
@@ -856,10 +1001,12 @@ export default function App() {
     [altResults, sortBy]
   );
 
-  const displayed = useMemo(() =>
-    viewFilter === "watched" ? sorted.filter(t => watchlist.has(t.symbol)) : sorted,
-    [sorted, viewFilter, watchlist]
-  );
+  const displayed = useMemo(() => {
+    let list = sorted;
+    if (viewFilter === "watched") list = sorted.filter(t => watchlist.has(t.symbol));
+    if (viewFilter === "active") list = sorted.filter(t => trades[t.symbol]?.isActive);
+    return list;
+  }, [sorted, viewFilter, watchlist, trades]);
 
   const shortlist = sorted.filter(t => t.analysis && t.analysis.score >= 40 && t.analysis.btcSafe);
 
@@ -1071,12 +1218,12 @@ export default function App() {
         )}
 
         {/* ── View Filter + Sort ── */}
-        <div style={{ display: "flex", gap: 6, marginBottom: 10, overflowX: "auto", paddingBottom: 2, alignItems: "center" }}>
-          {/* Watchlist filter toggle */}
+        <div style={{ display: "flex", gap: 6, marginBottom: 14, overflowX: "auto", paddingBottom: 2, alignItems: "center" }}>
+          {/* Main Filter Toggle */}
           <div style={{ display: "flex", borderRadius: 6, overflow: "hidden", flexShrink: 0, border: "1px solid #1e1e2e" }}>
-            {[["all", "ALL"], ["watched", `★ ${watchlist.size}`]].map(([val, label]) => (
+            {[["all", "ALL"], ["watched", `★ ${watchlist.size}`], ["active", "💼 ACTIVE"]].map(([val, label]) => (
               <button key={val} onClick={() => setViewFilter(val)} style={{
-                background: viewFilter === val ? (val === "watched" ? "#854d0e" : "#818cf8") : "#12121e",
+                background: viewFilter === val ? (val === "watched" ? "#854d0e" : val === "active" ? "#1e3a8a" : "#818cf8") : "#12121e",
                 color: viewFilter === val ? "#fff" : "#6b7280",
                 border: "none", padding: "5px 10px", fontSize: 11, fontWeight: 700,
                 cursor: "pointer", whiteSpace: "nowrap",
@@ -1113,7 +1260,13 @@ export default function App() {
           <div className="card" style={{ background: "#12121e", border: "1px solid #1e1e2e", borderRadius: 12, padding: 14, marginBottom: 10, textAlign: "center" }}>
             <div style={{ fontSize: 24, marginBottom: 6 }}>★</div>
             <div style={{ fontSize: 13, fontWeight: 700, color: "#94a3b8" }}>No watched tokens</div>
-            <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>Tap the ★ on any token card to add it to your watchlist.</div>
+          </div>
+        )}
+        {!loading && viewFilter === "active" && displayed.length === 0 && (
+          <div className="card" style={{ background: "#12121e", border: "1px solid #1e1e2e", borderRadius: 12, padding: 14, marginBottom: 10, textAlign: "center" }}>
+            <div style={{ fontSize: 24, marginBottom: 6 }}>💼</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#94a3b8" }}>No active trades</div>
+            <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>Expand a token card to log a trade.</div>
           </div>
         )}
 
@@ -1124,14 +1277,23 @@ export default function App() {
           const isGood = analysis.score >= 40 && analysis.btcSafe;
           const hasSetup = analysis.entry;
           const isSelected = selected.has(symbol);
-          const bc = selectMode && isSelected ? "#818cf8" : hasSetup ? "#22c55e50" : isGood ? "#818cf850" : "#1e1e2e";
+          const trade = trades[symbol];
+          const bc = selectMode && isSelected ? "#818cf8" : trade?.isActive ? "#3b82f680" : hasSetup ? "#22c55e50" : isGood ? "#818cf850" : "#1e1e2e";
+
+          // Calculate PNL for unexpanded badge
+          let currentPnlPct = 0;
+          if (trade?.isActive) {
+            const currentVal = (trade.totalCapital / trade.avgEntryPrice) * analysis.currentPrice;
+            currentPnlPct = ((currentVal - trade.totalCapital) / trade.totalCapital) * 100;
+          }
 
           return (
             <div key={symbol} className="card" style={{ animationDelay: `${idx * 0.04}s`, marginBottom: 8 }}>
               <div
                 onClick={() => selectMode ? toggleSelect(symbol) : setExpanded(isExpanded ? null : symbol)}
                 style={{
-                  background: "#12121e", border: `1px solid ${bc}`, borderRadius: 12,
+                  background: trade?.isActive ? "linear-gradient(to bottom right, #1a2035, #12121e)" : "#12121e", 
+                  border: `1px solid ${bc}`, borderRadius: 12,
                   cursor: "pointer", overflow: "hidden", transition: "border-color 0.3s",
                 }}
               >
@@ -1151,22 +1313,15 @@ export default function App() {
                         )}
                         <span style={{ fontSize: 15, fontWeight: 800 }}>{name}</span>
                         <span style={{ fontSize: 10, color: "#6b7280", fontFamily: "var(--mono)" }}>{symbol.replace("USDT", "")}</span>
-                        {hasSetup && (
+                        
+                        {trade?.isActive && (
+                           <span style={{ background: currentPnlPct >= 0 ? "#14532d" : "#7f1d1d", color: currentPnlPct >= 0 ? "#4ade80" : "#f87171", padding: "2px 6px", borderRadius: 4, fontSize: 10, fontWeight: 800, fontFamily: "var(--mono)", letterSpacing: 0.5 }}>
+                             {currentPnlPct >= 0 ? "+" : ""}{currentPnlPct.toFixed(2)}%
+                           </span>
+                        )}
+
+                        {!trade?.isActive && hasSetup && (
                           <span style={{ background: "#166534", color: "#4ade80", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 800, letterSpacing: 1 }}>SETUP</span>
-                        )}
-                        {analysis.liquiditySweep?.detected && (
-                          <span style={{
-                            background: analysis.liquiditySweep.bullish ? "#14532d" : "#7f1d1d",
-                            color: analysis.liquiditySweep.bullish ? "#86efac" : "#fca5a5",
-                            padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 800, letterSpacing: 1,
-                          }}>
-                            {analysis.liquiditySweep.bullish ? "SWEEP ↑" : "SWEEP ↓"}
-                          </span>
-                        )}
-                        {analysis.sessionInfo?.sessionTransitionRisk && (
-                          <span style={{ background: "#431407", color: "#fb923c", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 800, letterSpacing: 1 }}>
-                            SESSION RISK
-                          </span>
                         )}
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
@@ -1175,17 +1330,26 @@ export default function App() {
                       </div>
                     </div>
                     <div style={{ display: "flex", alignItems: "flex-start", gap: 8, flexShrink: 0 }}>
-                      <div style={{ textAlign: "right" }}>
+                      <div style={{ textAlign: "right", display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
                         <div style={{ fontSize: 16, fontWeight: 800, fontFamily: "var(--mono)" }}>${fp(analysis.currentPrice)}</div>
                         <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: analysis.change24h >= 0 ? "#4ade80" : "#f87171", fontWeight: 700 }}>
                           {analysis.change24h >= 0 ? "+" : ""}{analysis.change24h.toFixed(2)}%
                         </div>
                       </div>
-                      <button onClick={(e) => { e.stopPropagation(); toggleWatch(symbol); }} style={{
-                        background: "none", border: "none", cursor: "pointer", padding: "2px 0 0",
-                        fontSize: 18, color: watchlist.has(symbol) ? "#fbbf24" : "#2a2a3e",
-                        transition: "color 0.2s", lineHeight: 1,
-                      }}>★</button>
+                      {/* Interactive Icons */}
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "center" }}>
+                        <button onClick={(e) => { e.stopPropagation(); toggleWatch(symbol); }} style={{
+                          background: "none", border: "none", cursor: "pointer", padding: 0,
+                          fontSize: 16, color: watchlist.has(symbol) ? "#fbbf24" : "#2a2a3e",
+                          transition: "color 0.2s", lineHeight: 1,
+                        }}>★</button>
+                        <button onClick={(e) => { e.stopPropagation(); refreshIndividualToken(symbol); }} disabled={refreshingSymbol === symbol} style={{
+                          background: "none", border: "none", cursor: "pointer", padding: 0,
+                          fontSize: 13, color: "#6b7280", lineHeight: 1, 
+                        }}>
+                          <div className={refreshingSymbol === symbol ? "spin" : ""}>⟳</div>
+                        </button>
+                      </div>
                     </div>
                   </div>
 
@@ -1223,8 +1387,17 @@ export default function App() {
                 {/* Expanded */}
                 {isExpanded && (
                   <div style={{ borderTop: "1px solid #1a1a2e", padding: 14, background: "#0d0d18" }}>
-                    {/* Reasons */}
-                    <div style={{ marginBottom: 14 }}>
+                    
+                    {/* Trade Manager Component */}
+                    <TradeManager 
+                      symbol={symbol} 
+                      currentPrice={analysis.currentPrice} 
+                      trades={trades} 
+                      setTrades={setTrades} 
+                    />
+
+                    {/* S/R Levels & Analysis Details (Truncated for clean look, matching previous layout) */}
+                    <div style={{ marginTop: 14 }}>
                       <div style={{ fontSize: 10, color: "#6b7280", fontWeight: 800, letterSpacing: 1.5, marginBottom: 6 }}>ANALYSIS</div>
                       {analysis.reasons.map((r, i) => (
                         <div key={i} style={{ fontSize: 12, color: "#94a3b8", padding: "2px 0" }}>
