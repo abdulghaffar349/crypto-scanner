@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { db, ref, set, onValue, FIREBASE_ENABLED } from "./firebase.js";
 
 // ─── Token Config ───────────────────────────────────────────────
 const DEFAULT_TOKENS = [
@@ -124,14 +125,21 @@ function detectCandlePattern(candles) {
   if (candles.length < 3) return { pattern: "N/A", bullish: false };
   const last = candles[candles.length - 1];
   const prev = candles[candles.length - 2];
+  const ante = candles[candles.length - 3];
   const [o, h, l, c] = [parseFloat(last[1]), parseFloat(last[2]), parseFloat(last[3]), parseFloat(last[4])];
   const [po, , , pc] = [parseFloat(prev[1]), parseFloat(prev[2]), parseFloat(prev[3]), parseFloat(prev[4])];
+  const [ao, , , ac] = [parseFloat(ante[1]), parseFloat(ante[2]), parseFloat(ante[3]), parseFloat(ante[4])];
   const body = Math.abs(c - o);
   const upperWick = h - Math.max(o, c);
   const lowerWick = Math.min(o, c) - l;
+  const anteBody = Math.abs(ac - ao);
+  const prevBody = Math.abs(pc - po);
 
   if (c > o && body > Math.abs(pc - po) && c > po && o < pc) return { pattern: "Bullish Engulfing", bullish: true };
   if (c > o && lowerWick > body * 2 && upperWick < body * 0.3) return { pattern: "Hammer", bullish: true };
+  // Morning Star: bearish large candle → small doji → bullish candle closing above ante midpoint
+  if (ac < ao && anteBody > 0 && prevBody < anteBody * 0.35 && c > o && c > (ao + ac) / 2)
+    return { pattern: "Morning Star", bullish: true };
   if (c < o && upperWick > body * 2 && lowerWick < body * 0.3) return { pattern: "Shooting Star", bullish: false };
   if (c < o && body > Math.abs(pc - po) && c < po && o > pc) return { pattern: "Bearish Engulfing", bullish: false };
   if (c > o) return { pattern: "Green Candle", bullish: true };
@@ -166,11 +174,20 @@ function detectFVG(candles) {
     const h1 = parseFloat(candles[i][2]);
     const l3 = parseFloat(candles[i + 2][3]);
     if (l3 > h1) {
-      const currentPrice = parseFloat(candles[candles.length - 1][4]);
+      const lastCandle = candles[candles.length - 1];
+      const currentPrice = parseFloat(lastCandle[4]);
       const gapMid = (l3 + h1) / 2;
       const inFVG = currentPrice >= h1 && currentPrice <= l3;
       const nearFVG = Math.abs(currentPrice - gapMid) / currentPrice < 0.015;
-      if (inFVG || nearFVG) return { found: true, high: l3, low: h1, mid: gapMid, inZone: inFVG };
+      if (inFVG || nearFVG) {
+        // Check for rejection candle: wick dips below midpoint but body closes above it
+        const lo = parseFloat(lastCandle[1]), lc = parseFloat(lastCandle[4]);
+        const lLow = parseFloat(lastCandle[3]);
+        const lBody = Math.abs(lc - lo) || 0.0001;
+        const lLowerWick = Math.min(lo, lc) - lLow;
+        const hasRejection = lLow < gapMid && lc > gapMid && lLowerWick > lBody * 0.5;
+        return { found: true, high: l3, low: h1, mid: gapMid, inZone: inFVG, hasRejection };
+      }
     }
   }
   return { found: false };
@@ -292,6 +309,8 @@ function scoreToken(data, btcData) {
   const recentVol = volumes1h.slice(-5).reduce((a, b) => a + b, 0) / 5;
   const avgVol20 = volumes1h.slice(-20).reduce((a, b) => a + b, 0) / 20;
   const volRatio = avgVol20 > 0 ? recentVol / avgVol20 : 0;
+  // Playbook: volume on the signal candle itself must exceed 20MA
+  const signalCandleVolOk = avgVol20 > 0 && volumes1h[volumes1h.length - 1] > avgVol20;
 
   const { pattern, bullish } = detectCandlePattern(candles1h);
   const { supports, resistances, nearSupport } = findSupportResistance(candles1h);
@@ -370,7 +389,10 @@ function scoreToken(data, btcData) {
   // ── Candle patterns ──
   if (bullish && nearSupport) { score += 15; reasons.push(`${pattern} at support`); }
   else if (bullish) { score += 5; reasons.push(pattern); }
-  if (fvg.found && fvg.inZone && rsi1h < 50) { score += 20; reasons.push("Price in FVG reclaim zone"); }
+  if (fvg.found && fvg.inZone && rsi1h < 50) {
+    score += 20;
+    reasons.push(fvg.hasRejection ? "Price in FVG reclaim zone + rejection candle confirmed" : "Price in FVG reclaim zone (awaiting rejection candle)");
+  }
 
   // ── MACD ──
   if (macd) {
@@ -419,9 +441,13 @@ function scoreToken(data, btcData) {
 
   // ── Setup detection ──
   if (rsi1h >= 30 && rsi1h <= 40 && nearSupport && bullish && volRatio > 0.8 && btcSafe) {
-    setupType = "A: RSI + Structure"; score += 10;
+    if (signalCandleVolOk) {
+      setupType = "A: RSI + Structure"; score += 10;
+    } else {
+      reasons.push("⚠ Signal candle volume below 20MA — Setup A unconfirmed");
+    }
   } else if (fvg.found && fvg.inZone && rsi1h < 50 && btcSafe) {
-    setupType = "B: FVG Reclaim";
+    setupType = fvg.hasRejection ? "B: FVG Reclaim ✓" : "B: FVG Reclaim";
   } else if (rsi1h < 60 && change24h < 2 && btcSafe && score >= 40) {
     setupType = "C: Momentum Candidate";
   }
@@ -444,11 +470,17 @@ function scoreToken(data, btcData) {
     if (asianBuffer < stopLoss) sessionAdjustedStop = asianBuffer;
   }
 
+  // Playbook fixed TP levels (3.5% / 5.0%)
+  const playbookTP1 = currentPrice * 1.035;
+  const playbookTP2 = currentPrice * 1.05;
+  const playbookStop = currentPrice * 0.98;
+
   return {
     rsi1h, rsi4h, currentPrice, ema200: currentEMA200, priceVsEMA,
     volRatio, pattern, bullish, supports, resistances, nearSupport,
     fvg, btcChange4h, btcSafe, change24h, score, reasons, setupType,
     stopLoss, tp1, tp2, riskPct, rrRatio,
+    playbookTP1, playbookTP2, playbookStop, signalCandleVolOk,
     entry: setupType !== "None" && btcSafe,
     macd, inUptrend, trendStrength, atr, bb, roc, momentumImproving,
     volSpike, volContext, isVolumeClimax,
@@ -673,10 +705,11 @@ function NarrativeTags({ narratives }) {
 }
 
 // ─── Trade Manager Component ─────────────────────────────────────
-function TradeManager({ symbol, currentPrice, trades, setTrades }) {
+function TradeManager({ symbol, currentPrice, riskPct, rsi1h, trades, setTrades }) {
   const trade = trades[symbol];
   const [priceInput, setPriceInput] = useState(currentPrice);
   const [capitalInput, setCapitalInput] = useState("");
+  const [portfolioInput, setPortfolioInput] = useState("");
 
   const handleStartTrade = () => {
     const p = parseFloat(priceInput);
@@ -733,6 +766,20 @@ function TradeManager({ symbol, currentPrice, trades, setTrades }) {
     pnlPct = (pnlUsd / trade.totalCapital) * 100;
   }
 
+  // Hold time
+  const hoursElapsed = trade?.isActive && trade.entries?.[0]?.date
+    ? (Date.now() - new Date(trade.entries[0].date)) / 3600000 : 0;
+  const holdColor = hoursElapsed >= 48 ? "#ef4444" : hoursElapsed >= 36 ? "#fb923c" : "#6b7280";
+
+  // Playbook position sizing — 2% rule, capped at portfolio (spot = no leverage)
+  const portfolio = parseFloat(portfolioInput);
+  const stopPct = riskPct > 0 ? riskPct : 2;
+  const rawSize = portfolio > 0 ? (portfolio * 0.02) / (stopPct / 100) : null;
+  const suggestedSize = rawSize !== null ? Math.min(rawSize, portfolio) : null;
+  const isCapped = rawSize !== null && rawSize > portfolio;
+  const maxLossUsd = suggestedSize !== null ? suggestedSize * (stopPct / 100) : null;
+  const maxLossPct = maxLossUsd !== null && portfolio > 0 ? (maxLossUsd / portfolio) * 100 : null;
+
   return (
     <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 14, background: "#1a1a2e", border: "1px solid #312e8180", borderRadius: 10, padding: 14 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -742,22 +789,74 @@ function TradeManager({ symbol, currentPrice, trades, setTrades }) {
         )}
       </div>
 
+      {/* RSI overbought early exit alert */}
+      {trade?.isActive && rsi1h > 75 && (
+        <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid #ef444450", borderRadius: 7, padding: "7px 10px", marginBottom: 10, fontSize: 11, color: "#f87171", fontWeight: 700 }}>
+          ⚠ RSI {rsi1h?.toFixed(0)} — Overbought. Playbook: consider early exit.
+        </div>
+      )}
+
       {!trade?.isActive ? (
-        <div style={{ display: "flex", gap: 8 }}>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 4 }}>ENTRY PRICE</div>
-            <input type="number" value={priceInput} onChange={e => setPriceInput(e.target.value)} style={{ width: "100%", background: "#12121e", border: "1px solid #2a2a3e", borderRadius: 6, padding: "8px", color: "#e2e8f0", fontSize: 13, fontFamily: "var(--mono)", outline: "none" }} />
+        <div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 4 }}>ENTRY PRICE</div>
+              <input type="number" value={priceInput} onChange={e => setPriceInput(e.target.value)} style={{ width: "100%", background: "#12121e", border: "1px solid #2a2a3e", borderRadius: 6, padding: "8px", color: "#e2e8f0", fontSize: 13, fontFamily: "var(--mono)", outline: "none" }} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 4 }}>CAPITAL (USD)</div>
+              <input type="number" placeholder="0.00" value={capitalInput} onChange={e => setCapitalInput(e.target.value)} style={{ width: "100%", background: "#12121e", border: "1px solid #2a2a3e", borderRadius: 6, padding: "8px", color: "#e2e8f0", fontSize: 13, fontFamily: "var(--mono)", outline: "none" }} />
+            </div>
+            <div style={{ display: "flex", alignItems: "flex-end" }}>
+              <button onClick={handleStartTrade} style={{ background: "#818cf8", color: "#fff", border: "none", borderRadius: 6, padding: "8px 16px", fontWeight: 700, fontSize: 12, cursor: "pointer", height: 35 }}>START</button>
+            </div>
           </div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 4 }}>CAPITAL (USD)</div>
-            <input type="number" placeholder="0.00" value={capitalInput} onChange={e => setCapitalInput(e.target.value)} style={{ width: "100%", background: "#12121e", border: "1px solid #2a2a3e", borderRadius: 6, padding: "8px", color: "#e2e8f0", fontSize: 13, fontFamily: "var(--mono)", outline: "none" }} />
-          </div>
-          <div style={{ display: "flex", alignItems: "flex-end" }}>
-            <button onClick={handleStartTrade} style={{ background: "#818cf8", color: "#fff", border: "none", borderRadius: 6, padding: "8px 16px", fontWeight: 700, fontSize: 12, cursor: "pointer", height: 35 }}>START</button>
+          {/* Position sizing calculator */}
+          <div style={{ background: "#0d0d18", border: "1px solid #1e1e2e", borderRadius: 7, padding: "8px 10px" }}>
+            <div style={{ fontSize: 9, color: "#a78bfa", fontWeight: 700, letterSpacing: 1, marginBottom: 6 }}>PLAYBOOK POSITION SIZER (2% RULE)</div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: suggestedSize ? 8 : 0 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 3 }}>PORTFOLIO ($)</div>
+                <input type="number" placeholder="e.g. 1000" value={portfolioInput} onChange={e => setPortfolioInput(e.target.value)} style={{ width: "100%", background: "#12121e", border: "1px solid #2a2a3e", borderRadius: 6, padding: "6px 8px", color: "#e2e8f0", fontSize: 12, fontFamily: "var(--mono)", outline: "none" }} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 3 }}>STOP LOSS %</div>
+                <div style={{ fontSize: 13, fontFamily: "var(--mono)", fontWeight: 700, color: "#f87171", padding: "6px 0" }}>{stopPct.toFixed(1)}%</div>
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 3 }}>POSITION SIZE</div>
+                <div style={{ fontSize: 13, fontFamily: "var(--mono)", fontWeight: 700, color: suggestedSize ? "#a78bfa" : "#4b5563" }}>
+                  {suggestedSize ? `$${suggestedSize.toFixed(0)}` : "—"}
+                </div>
+              </div>
+            </div>
+            {suggestedSize && (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", paddingTop: 6, borderTop: "1px solid #1e1e2e" }}>
+                <span style={{ fontSize: 10, color: "#6b7280" }}>
+                  Max loss: <span style={{ color: "#f87171", fontFamily: "var(--mono)", fontWeight: 700 }}>${maxLossUsd.toFixed(2)}</span>
+                  <span style={{ color: "#4b5563" }}> ({maxLossPct.toFixed(2)}% of portfolio)</span>
+                </span>
+                {isCapped && (
+                  <span style={{ fontSize: 9, fontWeight: 700, color: "#fbbf24", background: "#fbbf2415", border: "1px solid #fbbf2430", borderRadius: 4, padding: "2px 6px" }}>
+                    CAPPED — SPOT LIMIT
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         </div>
       ) : (
         <div>
+          {/* Hold time warning */}
+          {hoursElapsed > 0 && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, padding: "5px 8px", background: "#0d0d18", borderRadius: 6, border: `1px solid ${holdColor}40` }}>
+              <span style={{ fontSize: 10, color: holdColor, fontWeight: 700 }}>
+                ⏱ {hoursElapsed >= 48 ? "⚠ EXCEEDED" : `${hoursElapsed.toFixed(0)}H`} / 48H MAX
+              </span>
+              {hoursElapsed >= 48 && <span style={{ fontSize: 9, color: "#ef4444" }}>— Playbook: exit now</span>}
+              {hoursElapsed >= 36 && hoursElapsed < 48 && <span style={{ fontSize: 9, color: "#fb923c" }}>— approaching limit</span>}
+            </div>
+          )}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 14, paddingBottom: 14, borderBottom: "1px solid #2a2a3e" }}>
             <div>
               <div style={{ fontSize: 9, color: "#6b7280" }}>AVG ENTRY</div>
@@ -774,13 +873,13 @@ function TradeManager({ symbol, currentPrice, trades, setTrades }) {
               </div>
             </div>
           </div>
-          
+
           <div style={{ fontSize: 9, color: "#a5b4fc", marginBottom: 6, fontWeight: 700 }}>ADD DCA POSITION</div>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
             <input type="number" placeholder="Price" value={priceInput} onChange={e => setPriceInput(e.target.value)} style={{ flex: 1, background: "#12121e", border: "1px solid #2a2a3e", borderRadius: 6, padding: "8px", color: "#e2e8f0", fontSize: 12, fontFamily: "var(--mono)", outline: "none" }} />
             <input type="number" placeholder="Amount (USD)" value={capitalInput} onChange={e => setCapitalInput(e.target.value)} style={{ flex: 1, background: "#12121e", border: "1px solid #2a2a3e", borderRadius: 6, padding: "8px", color: "#e2e8f0", fontSize: 12, fontFamily: "var(--mono)", outline: "none" }} />
-            <button onClick={handleDCA} style={{ background: "#4ade8020", color: "#4ade80", border: "1px solid #4ade8040", borderRadius: 6, padding: "0 14px", fontWeight: 700, fontSize: 11, cursor: "pointer" }}>DCA</button>
           </div>
+          <button onClick={handleDCA} style={{ width: "100%", background: "#4ade8020", color: "#4ade80", border: "1px solid #4ade8040", borderRadius: 6, padding: "9px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>DCA</button>
         </div>
       )}
     </div>
@@ -793,6 +892,10 @@ function SettingsModal({ tokens, onSave, onClose }) {
   const [list, setList] = useState(tokens.filter(t => t.role === "alt"));
   const [newSymbol, setNewSymbol] = useState("");
   const [newName, setNewName] = useState("");
+  const [newNarratives, setNewNarratives] = useState([]);
+
+  const toggleNarrative = (n) =>
+    setNewNarratives(prev => prev.includes(n) ? prev.filter(x => x !== n) : [...prev, n]);
 
   const remove = (sym) => setList(prev => prev.filter(t => t.symbol !== sym));
   const add = () => {
@@ -800,9 +903,10 @@ function SettingsModal({ tokens, onSave, onClose }) {
     if (!sym || !newName) return;
     const full = sym.endsWith("USDT") ? sym : sym + "USDT";
     if (list.find(t => t.symbol === full)) return;
-    setList(prev => [...prev, { symbol: full, name: newName, role: "alt", narrative: [] }]);
+    setList(prev => [...prev, { symbol: full, name: newName, role: "alt", narrative: newNarratives }]);
     setNewSymbol("");
     setNewName("");
+    setNewNarratives([]);
   };
 
   return (
@@ -814,27 +918,64 @@ function SettingsModal({ tokens, onSave, onClose }) {
         </div>
 
         {/* Add Token */}
-        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-          <input value={newSymbol} onChange={e => setNewSymbol(e.target.value)} placeholder="DOGE" style={{
-            flex: 1, background: "#1a1a2e", border: "1px solid #2a2a3e", borderRadius: 8,
-            padding: "8px 12px", color: "#e2e8f0", fontSize: 13, fontFamily: "var(--mono)", outline: "none",
-          }} />
-          <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Dogecoin" style={{
-            flex: 1, background: "#1a1a2e", border: "1px solid #2a2a3e", borderRadius: 8,
-            padding: "8px 12px", color: "#e2e8f0", fontSize: 13, outline: "none",
-          }} />
-          <button onClick={add} style={{ background: "#818cf8", color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>+</button>
+        <div style={{ background: "#0d0d18", border: "1px solid #1e1e2e", borderRadius: 10, padding: 12, marginBottom: 16 }}>
+          <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1.2, marginBottom: 8 }}>ADD TOKEN</div>
+
+          {/* Narrative Picker — shown first so keyboard doesn't hide it */}
+          <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1.2, marginBottom: 6 }}>NARRATIVES</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+            {Object.entries(NARRATIVE_COLORS).map(([n, color]) => {
+              const active = newNarratives.includes(n);
+              return (
+                <button key={n} onClick={() => toggleNarrative(n)} style={{
+                  fontSize: 11, fontWeight: 700, letterSpacing: 0.5,
+                  padding: "6px 11px", borderRadius: 6, cursor: "pointer",
+                  background: active ? `${color}22` : "#1a1a2e",
+                  color: active ? color : "#4b5563",
+                  border: `1px solid ${active ? color + "60" : "#2a2a3e"}`,
+                  transition: "all 0.15s", minHeight: 32,
+                }}>{n}</button>
+              );
+            })}
+          </div>
+
+          {/* Symbol + Name inputs */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <input value={newSymbol} onChange={e => setNewSymbol(e.target.value)} placeholder="DOGE" style={{
+              flex: 1, background: "#1a1a2e", border: "1px solid #2a2a3e", borderRadius: 8,
+              padding: "8px 12px", color: "#e2e8f0", fontSize: 13, fontFamily: "var(--mono)", outline: "none",
+            }} />
+            <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Dogecoin" style={{
+              flex: 1, background: "#1a1a2e", border: "1px solid #2a2a3e", borderRadius: 8,
+              padding: "8px 12px", color: "#e2e8f0", fontSize: 13, outline: "none",
+            }} />
+          </div>
+          <button onClick={add} style={{ width: "100%", background: "#818cf8", color: "#fff", border: "none", borderRadius: 8, padding: "9px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>+ Add Token</button>
         </div>
 
         {/* Token List */}
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {list.map(t => (
             <div key={t.symbol} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#1a1a2e", borderRadius: 8, padding: "8px 12px" }}>
-              <div>
-                <span style={{ fontWeight: 700, fontSize: 13 }}>{t.name}</span>
-                <span style={{ color: "#6b7280", fontSize: 11, fontFamily: "var(--mono)", marginLeft: 8 }}>{t.symbol}</span>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ fontWeight: 700, fontSize: 13 }}>{t.name}</span>
+                  <span style={{ color: "#6b7280", fontSize: 11, fontFamily: "var(--mono)" }}>{t.symbol.replace("USDT", "")}</span>
+                </div>
+                {t.narrative && t.narrative.length > 0 && (
+                  <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginTop: 4 }}>
+                    {t.narrative.map(n => (
+                      <span key={n} style={{
+                        fontSize: 9, fontWeight: 700, letterSpacing: 0.8,
+                        padding: "2px 5px", borderRadius: 3,
+                        background: `${NARRATIVE_COLORS[n] || "#818cf8"}22`,
+                        color: NARRATIVE_COLORS[n] || "#818cf8",
+                      }}>{n}</span>
+                    ))}
+                  </div>
+                )}
               </div>
-              <button onClick={() => remove(t.symbol)} style={{ background: "none", border: "none", color: "#ef4444", fontSize: 16, cursor: "pointer", padding: "0 4px" }}>×</button>
+              <button onClick={() => remove(t.symbol)} style={{ background: "none", border: "none", color: "#ef4444", fontSize: 18, cursor: "pointer", padding: "0 4px", flexShrink: 0 }}>×</button>
             </div>
           ))}
         </div>
@@ -875,17 +1016,49 @@ export default function App() {
   const [copied, setCopied] = useState(null); // symbol of last copied token
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState(new Set());
+  const [searchQuery, setSearchQuery] = useState("");
+  const [syncStatus, setSyncStatus] = useState(FIREBASE_ENABLED ? "syncing" : "offline");
   const timerRef = useRef(null);
+  const firebaseSyncRef = useRef(false); // prevent write-loop on initial remote load
 
+  // ── Firebase real-time listener (mount only) ──
+  useEffect(() => {
+    if (!FIREBASE_ENABLED || !db) return;
+    const root = ref(db, "crypto-scanner");
+    const unsub = onValue(root, (snapshot) => {
+      const remote = snapshot.val();
+      if (remote && !firebaseSyncRef.current) {
+        firebaseSyncRef.current = true; // block writes during hydration
+        if (remote.tokens) setTokens(remote.tokens);
+        if (remote.trades) setTrades(remote.trades);
+        if (remote.watchlist) setWatchlist(new Set(remote.watchlist));
+        setTimeout(() => { firebaseSyncRef.current = false; }, 500);
+      }
+      setSyncStatus("synced");
+    }, (err) => {
+      console.warn("[Firebase] read error:", err);
+      setSyncStatus("offline");
+    });
+    return () => unsub();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Persist trades ──
   useEffect(() => {
     localStorage.setItem("pb_trades", JSON.stringify(trades));
+    if (FIREBASE_ENABLED && db && !firebaseSyncRef.current) {
+      try { set(ref(db, "crypto-scanner/trades"), trades); } catch (e) { /* silent */ }
+    }
   }, [trades]);
 
   const toggleWatch = (symbol) => {
     setWatchlist(prev => {
       const next = new Set(prev);
       if (next.has(symbol)) next.delete(symbol); else next.add(symbol);
-      localStorage.setItem("pb_watchlist", JSON.stringify([...next]));
+      const arr = [...next];
+      localStorage.setItem("pb_watchlist", JSON.stringify(arr));
+      if (FIREBASE_ENABLED && db) {
+        try { set(ref(db, "crypto-scanner/watchlist"), arr); } catch (e) { /* silent */ }
+      }
       return next;
     });
   };
@@ -946,6 +1119,9 @@ export default function App() {
     const full = [btc, ...altList];
     setTokens(full);
     localStorage.setItem("pb_tokens", JSON.stringify(full));
+    if (FIREBASE_ENABLED && db) {
+      try { set(ref(db, "crypto-scanner/tokens"), full); } catch (e) { /* silent */ }
+    }
   };
 
   const fetchData = useCallback(async () => {
@@ -981,14 +1157,53 @@ export default function App() {
   const btcData = data["BTCUSDT"] || null;
   const btcAnalysis = btcData ? scoreToken(btcData, btcData) : null;
 
-  const altResults = useMemo(() =>
-    tokens.filter(t => t.role === "alt").map(t => {
+  // BTC 1H crash detection: compare last 2 candles on 1H
+  const btcChange1h = useMemo(() => {
+    const c = btcData?.candles1h;
+    if (!c || c.length < 2) return 0;
+    const prev = parseFloat(c[c.length - 2][4]);
+    const last = parseFloat(c[c.length - 1][4]);
+    return prev > 0 ? ((last - prev) / prev) * 100 : 0;
+  }, [btcData]);
+  const btcCrashing = btcChange1h < -2;
+  const hasActiveTrades = Object.values(trades).some(t => t?.isActive);
+
+  const altResults = useMemo(() => {
+    // First pass: score all tokens
+    const initial = tokens.filter(t => t.role === "alt").map(t => {
       const d = data[t.symbol];
       if (!d) return { ...t, analysis: null };
       return { ...t, analysis: scoreToken(d, btcData) };
-    }).filter(t => t.analysis),
-    [data, tokens, btcData]
-  );
+    }).filter(t => t.analysis);
+
+    // Compute hot narratives: sector where 3+ tokens pumped >5% in 24H
+    const narrativeMap = {};
+    initial.forEach(t => {
+      (t.narrative || []).forEach(n => {
+        if (!narrativeMap[n]) narrativeMap[n] = 0;
+        if ((t.analysis?.change24h || 0) > 5) narrativeMap[n]++;
+      });
+    });
+    const hotNarratives = new Set(
+      Object.entries(narrativeMap).filter(([, cnt]) => cnt >= 3).map(([n]) => n)
+    );
+
+    // Second pass: apply narrative laggard boost
+    return initial.map(t => {
+      const isLaggard = (t.narrative || []).some(n => hotNarratives.has(n)) &&
+        (t.analysis?.change24h || 0) < 3 && t.analysis?.btcSafe;
+      if (!isLaggard) return t;
+      return {
+        ...t,
+        analysis: {
+          ...t.analysis,
+          score: t.analysis.score + 10,
+          reasons: [...t.analysis.reasons, "Narrative laggard — sector hot, token hasn't pumped yet"],
+          setupType: t.analysis.setupType === "None" ? "C: Narrative Laggard" : t.analysis.setupType,
+        },
+      };
+    });
+  }, [data, tokens, btcData]);
 
   const sorted = useMemo(() =>
     [...altResults].sort((a, b) => {
@@ -1007,6 +1222,31 @@ export default function App() {
     if (viewFilter === "active") list = sorted.filter(t => trades[t.symbol]?.isActive);
     return list;
   }, [sorted, viewFilter, watchlist, trades]);
+
+  const searched = useMemo(() => {
+    if (!searchQuery.trim()) return displayed;
+    const q = searchQuery.toLowerCase();
+    return displayed.filter(t =>
+      t.name.toLowerCase().includes(q) ||
+      t.symbol.toLowerCase().includes(q) ||
+      (t.narrative || []).some(n => n.toLowerCase().includes(q))
+    );
+  }, [displayed, searchQuery]);
+
+  // Daily PNL: sum unrealized PNL across all active trades (must be after altResults)
+  const dailyPnl = useMemo(() => {
+    let total = 0, invested = 0;
+    altResults.forEach(t => {
+      const trade = trades[t.symbol];
+      if (trade?.isActive && t.analysis) {
+        const tokens_ = trade.totalCapital / trade.avgEntryPrice;
+        const cur = tokens_ * t.analysis.currentPrice;
+        total += cur - trade.totalCapital;
+        invested += trade.totalCapital;
+      }
+    });
+    return { pnl: total, invested };
+  }, [altResults, trades]);
 
   const shortlist = sorted.filter(t => t.analysis && t.analysis.score >= 40 && t.analysis.btcSafe);
 
@@ -1073,6 +1313,12 @@ export default function App() {
                 {lastUpdate ? lastUpdate.toLocaleTimeString() : "—"}
               </span>
               {autoRefresh && <span style={{ fontSize: 9, color: "#4ade80", fontWeight: 600 }}>● AUTO</span>}
+              {FIREBASE_ENABLED && (
+                <span style={{ fontSize: 9, fontWeight: 700, color: syncStatus === "synced" ? "#4ade80" : syncStatus === "syncing" ? "#fbbf24" : "#ef4444" }}
+                  title={`Firebase: ${syncStatus}`}>
+                  {syncStatus === "synced" ? "☁ SYNC" : syncStatus === "syncing" ? "◌ SYNC" : "✕ OFFLINE"}
+                </span>
+              )}
               <span style={{ width: 1, height: 10, background: "#2a2a3e", display: "inline-block" }} />
               <span style={{ fontSize: 9, fontWeight: 700, color: sessionInfo.sessionColor, letterSpacing: 0.5 }}>
                 ● {sessionInfo.session}
@@ -1096,6 +1342,49 @@ export default function App() {
       </header>
 
       <main style={{ maxWidth: 600, margin: "0 auto", padding: "12px 12px 100px" }}>
+
+        {/* ── BTC 1H Crash Alert ── */}
+        {btcCrashing && hasActiveTrades && (
+          <div className="card" style={{
+            background: "rgba(127,29,29,0.4)", border: "1px solid #ef444470",
+            borderRadius: 12, padding: "10px 14px", marginBottom: 10,
+            display: "flex", alignItems: "center", gap: 10,
+          }}>
+            <span style={{ fontSize: 18 }}>⚡</span>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 800, color: "#f87171", letterSpacing: 1 }}>
+                BTC DROPPED {Math.abs(btcChange1h).toFixed(2)}% IN 1H — ACTIVE TRADES AT RISK
+              </div>
+              <div style={{ fontSize: 10, color: "#fca5a5", marginTop: 2 }}>
+                Playbook: altcoins follow BTC down harder. Consider early exit.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Daily PNL Strip ── */}
+        {dailyPnl.invested > 0 && (
+          <div className="card" style={{
+            background: "#12121e", border: "1px solid #1e1e2e",
+            borderRadius: 12, padding: "10px 14px", marginBottom: 10,
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+          }}>
+            <span style={{ fontSize: 10, fontWeight: 700, color: "#6b7280", letterSpacing: 1 }}>OPEN POSITIONS</span>
+            <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+              <div>
+                <span style={{ fontSize: 9, color: "#6b7280" }}>INVESTED </span>
+                <span style={{ fontSize: 12, fontFamily: "var(--mono)", fontWeight: 700 }}>${dailyPnl.invested.toFixed(0)}</span>
+              </div>
+              <div>
+                <span style={{ fontSize: 9, color: "#6b7280" }}>UNREALIZED PNL </span>
+                <span style={{ fontSize: 13, fontFamily: "var(--mono)", fontWeight: 800, color: dailyPnl.pnl >= 0 ? "#4ade80" : "#f87171" }}>
+                  {dailyPnl.pnl >= 0 ? "+" : ""}{dailyPnl.pnl.toFixed(2)}
+                  {dailyPnl.invested > 0 && ` (${((dailyPnl.pnl / dailyPnl.invested) * 100).toFixed(2)}%)`}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ── BTC Status ── */}
         {btcAnalysis && (
@@ -1217,6 +1506,32 @@ export default function App() {
           </div>
         )}
 
+        {/* ── Search ── */}
+        <div style={{ position: "relative", marginBottom: 8 }}>
+          <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: "#4b5563", pointerEvents: "none" }}>🔍</span>
+          <input
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            placeholder="Search tokens, symbols or narratives…"
+            style={{
+              width: "100%", background: "#12121e", border: "1px solid #1e1e2e", borderRadius: 8,
+              padding: "8px 34px 8px 32px", color: "#e2e8f0", fontSize: 12,
+              fontFamily: "var(--mono)", outline: "none",
+            }}
+          />
+          {searchQuery && (
+            <button onClick={() => setSearchQuery("")} style={{
+              position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)",
+              background: "none", border: "none", color: "#6b7280", cursor: "pointer", fontSize: 14, lineHeight: 1,
+            }}>✕</button>
+          )}
+        </div>
+        {searchQuery && (
+          <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 6, fontFamily: "var(--mono)" }}>
+            {searched.length} / {displayed.length} tokens
+          </div>
+        )}
+
         {/* ── View Filter + Sort ── */}
         <div style={{ display: "flex", gap: 6, marginBottom: 14, overflowX: "auto", paddingBottom: 2, alignItems: "center" }}>
           {/* Main Filter Toggle */}
@@ -1269,9 +1584,14 @@ export default function App() {
             <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>Expand a token card to log a trade.</div>
           </div>
         )}
+        {!loading && searchQuery && searched.length === 0 && (
+          <div className="card" style={{ background: "#12121e", border: "1px solid #1e1e2e", borderRadius: 12, padding: 14, marginBottom: 10, textAlign: "center" }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#94a3b8" }}>No tokens match "{searchQuery}"</div>
+          </div>
+        )}
 
         {/* ── Token Cards ── */}
-        {displayed.map(({ symbol, name, narrative, analysis }, idx) => {
+        {searched.map(({ symbol, name, narrative, analysis }, idx) => {
           if (!analysis) return null;
           const isExpanded = expanded === symbol;
           const isGood = analysis.score >= 40 && analysis.btcSafe;
@@ -1389,11 +1709,13 @@ export default function App() {
                   <div style={{ borderTop: "1px solid #1a1a2e", padding: 14, background: "#0d0d18" }}>
                     
                     {/* Trade Manager Component */}
-                    <TradeManager 
-                      symbol={symbol} 
-                      currentPrice={analysis.currentPrice} 
-                      trades={trades} 
-                      setTrades={setTrades} 
+                    <TradeManager
+                      symbol={symbol}
+                      currentPrice={analysis.currentPrice}
+                      riskPct={analysis.riskPct}
+                      rsi1h={analysis.rsi1h}
+                      trades={trades}
+                      setTrades={setTrades}
                     />
 
                     {/* S/R Levels & Analysis Details (Truncated for clean look, matching previous layout) */}
@@ -1490,12 +1812,29 @@ export default function App() {
                     {hasSetup && (
                       <div style={{ background: "rgba(22,101,52,0.2)", border: "1px solid #16653440", borderRadius: 10, padding: 12 }}>
                         <div style={{ fontSize: 10, color: "#4ade80", fontWeight: 800, letterSpacing: 1.5, marginBottom: 8 }}>📌 TRADE LEVELS</div>
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
+                        {/* ATR-based levels */}
+                        <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1, marginBottom: 4 }}>ATR-BASED</div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, marginBottom: 10 }}>
                           {[
                             ["Entry", fp(analysis.currentPrice), "#f1f5f9"],
                             ["Stop", fp(analysis.stopLoss), "#f87171"],
                             ["TP1", fp(analysis.tp1), "#4ade80"],
                             ["TP2", fp(analysis.tp2), "#22c55e"],
+                          ].map(([label, val, color]) => (
+                            <div key={label}>
+                              <div style={{ fontSize: 9, color: "#6b7280" }}>{label}</div>
+                              <div style={{ fontSize: 12, color, fontFamily: "var(--mono)", fontWeight: 700 }}>${val}</div>
+                            </div>
+                          ))}
+                        </div>
+                        {/* Playbook fixed levels */}
+                        <div style={{ fontSize: 9, color: "#a78bfa", fontWeight: 700, letterSpacing: 1, marginBottom: 4 }}>PLAYBOOK (3.5% / 5.0%)</div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
+                          {[
+                            ["Entry", fp(analysis.currentPrice), "#f1f5f9"],
+                            ["Stop –2%", fp(analysis.playbookStop), "#f87171"],
+                            ["TP1 +3.5%", fp(analysis.playbookTP1), "#4ade80"],
+                            ["TP2 +5%", fp(analysis.playbookTP2), "#22c55e"],
                           ].map(([label, val, color]) => (
                             <div key={label}>
                               <div style={{ fontSize: 9, color: "#6b7280" }}>{label}</div>
