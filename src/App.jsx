@@ -1201,6 +1201,7 @@ export default function App() {
   });
   const [loading, setLoading] = useState(true);
   const [refreshingSymbol, setRefreshingSymbol] = useState(null); // specific token loader
+  const [refreshingBTC, setRefreshingBTC] = useState(false);
   const [progress, setProgress] = useState(0);
   const [lastUpdate, setLastUpdate] = useState(null);
   const [sortBy, setSortBy] = useState("score");
@@ -1218,7 +1219,8 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [syncStatus, setSyncStatus] = useState(FIREBASE_ENABLED ? "syncing" : "offline");
   const timerRef = useRef(null);
-  const firebaseSyncRef = useRef(false); // prevent write-loop on initial remote load
+  const firebaseSyncRef = useRef(false); // true = local write in-flight, suppress incoming onValue echo
+  const remoteUpdateRef = useRef(false); // true = processing remote data, skip trades/watchlist write-backs
 
   // ── Firebase real-time listener (mount only) ──
   useEffect(() => {
@@ -1226,12 +1228,18 @@ export default function App() {
     const root = ref(db, "crypto-scanner");
     const unsub = onValue(root, (snapshot) => {
       const remote = snapshot.val();
-      if (remote && !firebaseSyncRef.current) {
-        firebaseSyncRef.current = true; // block writes during hydration
+      if (firebaseSyncRef.current) {
+        // Our own write echoing back — skip state updates to avoid triggering a rescan
+        firebaseSyncRef.current = false;
+        setSyncStatus("synced");
+        return;
+      }
+      if (remote) {
+        remoteUpdateRef.current = true; // block trades/watchlist write-backs during hydration
         if (remote.tokens) setTokens(remote.tokens);
         if (remote.trades) setTrades(remote.trades);
         if (remote.watchlist) setWatchlist(new Set(remote.watchlist));
-        setTimeout(() => { firebaseSyncRef.current = false; }, 500);
+        setTimeout(() => { remoteUpdateRef.current = false; }, 500);
       }
       setSyncStatus("synced");
     }, (err) => {
@@ -1244,8 +1252,9 @@ export default function App() {
   // ── Persist trades ──
   useEffect(() => {
     localStorage.setItem("pb_trades", JSON.stringify(trades));
-    if (FIREBASE_ENABLED && db && !firebaseSyncRef.current) {
-      try { set(ref(db, "crypto-scanner/trades"), trades); } catch (e) { /* silent */ }
+    if (FIREBASE_ENABLED && db && !remoteUpdateRef.current) {
+      firebaseSyncRef.current = true;
+      try { set(ref(db, "crypto-scanner/trades"), trades); } catch (e) { firebaseSyncRef.current = false; }
     }
   }, [trades]);
 
@@ -1256,7 +1265,8 @@ export default function App() {
       const arr = [...next];
       localStorage.setItem("pb_watchlist", JSON.stringify(arr));
       if (FIREBASE_ENABLED && db) {
-        try { set(ref(db, "crypto-scanner/watchlist"), arr); } catch (e) { /* silent */ }
+        firebaseSyncRef.current = true;
+        try { set(ref(db, "crypto-scanner/watchlist"), arr); } catch (e) { firebaseSyncRef.current = false; }
       }
       return next;
     });
@@ -1296,6 +1306,16 @@ export default function App() {
     setRefreshingSymbol(null);
   };
 
+  const refreshBTC = async () => {
+    setRefreshingBTC(true);
+    const btcToken = tokens.find(t => t.symbol === "BTCUSDT");
+    const res = await fetchSingleToken("BTCUSDT");
+    if (res) {
+      setData(prev => ({ ...prev, BTCUSDT: { ...res, ...(btcToken || {}) } }));
+    }
+    setRefreshingBTC(false);
+  };
+
   const copySelected = () => {
     const tokens = displayed.filter(t => selected.has(t.symbol) && t.analysis);
     if (!tokens.length) return;
@@ -1319,7 +1339,8 @@ export default function App() {
     setTokens(full);
     localStorage.setItem("pb_tokens", JSON.stringify(full));
     if (FIREBASE_ENABLED && db) {
-      try { set(ref(db, "crypto-scanner/tokens"), full); } catch (e) { /* silent */ }
+      firebaseSyncRef.current = true;
+      try { set(ref(db, "crypto-scanner/tokens"), full); } catch (e) { firebaseSyncRef.current = false; }
     }
   };
 
@@ -1492,6 +1513,8 @@ export default function App() {
         @keyframes fadeUp { from { opacity:0; transform:translateY(10px) } to { opacity:1; transform:translateY(0) } }
         @keyframes shimmer { 0% { background-position: -200% 0 } 100% { background-position: 200% 0 } }
         @keyframes glow { 0%,100% { box-shadow: 0 0 8px rgba(129,140,248,0.3) } 50% { box-shadow: 0 0 16px rgba(129,140,248,0.6) } }
+        @keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
+        .spin { display: inline-block; animation: spin 0.8s linear infinite; }
         .card { animation: fadeUp 0.35s ease both; }
         .shimmer { background: linear-gradient(90deg,#1a1a2e 25%,#252540 50%,#1a1a2e 75%); background-size:200% 100%; animation:shimmer 1.5s infinite; border-radius:12px; }
       `}</style>
@@ -1609,7 +1632,15 @@ export default function App() {
                   {" 4H · "}RSI {btcAnalysis.rsi1h?.toFixed(0)} · ${fp(btcAnalysis.currentPrice)}
                 </div>
               </div>
-              <MiniChart candles={btcData?.candles1h?.slice(-40)} width={110} height={44} />
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+                <MiniChart candles={btcData?.candles1h?.slice(-40)} width={110} height={44} />
+                <button onClick={refreshBTC} disabled={refreshingBTC} style={{
+                  background: "none", border: "none", cursor: refreshingBTC ? "default" : "pointer",
+                  padding: 0, fontSize: 12, color: refreshingBTC ? "#4b5563" : "#6b7280", lineHeight: 1,
+                }}>
+                  <div className={refreshingBTC ? "spin" : ""}>⟳ BTC</div>
+                </button>
+              </div>
             </div>
           </div>
         )}
