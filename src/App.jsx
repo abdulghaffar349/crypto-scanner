@@ -135,15 +135,15 @@ function detectCandlePattern(candles) {
   const anteBody = Math.abs(ac - ao);
   const prevBody = Math.abs(pc - po);
 
-  if (c > o && body > Math.abs(pc - po) && c > po && o < pc) return { pattern: "Bullish Engulfing", bullish: true };
-  if (c > o && lowerWick > body * 2 && upperWick < body * 0.3) return { pattern: "Hammer", bullish: true };
+  if (c > o && body > Math.abs(pc - po) && c > po && o < pc) return { pattern: "Bullish Engulfing", bullish: true, confirmationStrength: "HIGH" };
+  if (c > o && lowerWick > body * 2 && upperWick < body * 0.3) return { pattern: "Hammer", bullish: true, confirmationStrength: "HIGH" };
   // Morning Star: bearish large candle → small doji → bullish candle closing above ante midpoint
   if (ac < ao && anteBody > 0 && prevBody < anteBody * 0.35 && c > o && c > (ao + ac) / 2)
-    return { pattern: "Morning Star", bullish: true };
-  if (c < o && upperWick > body * 2 && lowerWick < body * 0.3) return { pattern: "Shooting Star", bullish: false };
-  if (c < o && body > Math.abs(pc - po) && c < po && o > pc) return { pattern: "Bearish Engulfing", bullish: false };
-  if (c > o) return { pattern: "Green Candle", bullish: true };
-  return { pattern: "Red Candle", bullish: false };
+    return { pattern: "Morning Star", bullish: true, confirmationStrength: "HIGH" };
+  if (c < o && upperWick > body * 2 && lowerWick < body * 0.3) return { pattern: "Shooting Star", bullish: false, confirmationStrength: "HIGH" };
+  if (c < o && body > Math.abs(pc - po) && c < po && o > pc) return { pattern: "Bearish Engulfing", bullish: false, confirmationStrength: "HIGH" };
+  if (c > o) return { pattern: "Green Candle", bullish: true, confirmationStrength: "LOW" };
+  return { pattern: "Red Candle", bullish: false, confirmationStrength: "NONE" };
 }
 
 function findSupportResistance(candles, count = 3) {
@@ -195,6 +195,70 @@ function detectFVG(candles) {
 
 // ─── Session + Liquidity Analysis ────────────────────────────────
 // Sessions in UTC: Asian 00:00-08:00 · London 08:00-16:00 · US 13:00-22:00
+
+const SESSION_PROFILES = {
+  ASIAN: {
+    volumeMultiplier: 0.5,   // Expect 50% of daily avg volume
+    stopBuffer: 0.003,       // +0.3% wider stops for Asian wicks
+    color: "#a78bfa",
+    rules: {
+      volumeRule: "Session-adjusted (raw thresholds relaxed)",
+      stopAdjustment: "+0.3% buffer for wider wicks",
+      tpExpectation: "TP1 likely hits at London open (8-10 UTC)",
+      positionRule: "Full size OK if session-adjusted volume > 1.0",
+      edge: "RSI dip entry — let London volume drive recovery",
+    },
+  },
+  LONDON: {
+    volumeMultiplier: 1.2,
+    stopBuffer: 0,
+    color: "#60a5fa",
+    rules: {
+      volumeRule: "Standard volume thresholds apply",
+      stopAdjustment: "Standard 2% stop",
+      tpExpectation: "TP1 should hit within 4-8 hours",
+      positionRule: "Full size with standard rules",
+      edge: "London sets the trend. First 30min can be a fakeout — wait for confirmation.",
+    },
+  },
+  "LONDON/US": {
+    volumeMultiplier: 1.8,
+    stopBuffer: 0,
+    color: "#f97316",
+    rules: {
+      volumeRule: "Highest standards — require raw volume > 1.0",
+      stopAdjustment: "Standard 2% stop",
+      tpExpectation: "TP1 within 2-4 hours (peak liquidity)",
+      positionRule: "Full size, strictest checklist",
+      edge: "Maximum liquidity = most reliable signals. But also whipsaws.",
+    },
+  },
+  US: {
+    volumeMultiplier: 1.5,
+    stopBuffer: 0,
+    color: "#22c55e",
+    rules: {
+      volumeRule: "Standard to high — raw volume > 0.8 minimum",
+      stopAdjustment: "Standard 2% stop",
+      tpExpectation: "TP1 within 2-6 hours",
+      positionRule: "Full size, strictest checklist",
+      edge: "Strongest trends, most reliable. But macro news drops here (FOMC, CPI).",
+    },
+  },
+  "OFF-HOURS": {
+    volumeMultiplier: 0.4,
+    stopBuffer: 0.005,
+    color: "#6b7280",
+    rules: {
+      volumeRule: "Very cautious — session-adjusted only",
+      stopAdjustment: "+0.5% buffer (thin liquidity)",
+      tpExpectation: "Don't expect TP during this session",
+      positionRule: "REDUCE position by 50% or skip entirely",
+      edge: "Almost never a good time to enter. Use for watchlist building.",
+    },
+  },
+};
+
 function getSessionInfo() {
   const now = new Date();
   const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
@@ -209,6 +273,8 @@ function getSessionInfo() {
   else if (inUS)     { session = "US";        sessionColor = "#22c55e"; }
   else if (inAsian)  { session = "ASIAN";     sessionColor = "#a78bfa"; }
   else               { session = "OFF-HOURS"; sessionColor = "#6b7280"; }
+
+  const profile = SESSION_PROFILES[session] || SESSION_PROFILES["OFF-HOURS"];
 
   // Time to next major session open
   let nextSession, minsToNext;
@@ -225,7 +291,24 @@ function getSessionInfo() {
     inDangerWindow, sessionTransitionRisk,
     hoursToNext:   Math.floor(minsToNext / 60),
     minsRemaining: minsToNext % 60,
+    // New session-aware fields
+    volumeMultiplier: profile.volumeMultiplier,
+    stopBuffer: profile.stopBuffer,
+    rules: profile.rules,
   };
+}
+
+// Session-adjusted volume: normalizes raw volume against what's expected for the current session
+function getSessionAdjustedVolume(rawRatio, session) {
+  const profile = SESSION_PROFILES[session] || SESSION_PROFILES["OFF-HOURS"];
+  const adjusted = profile.volumeMultiplier > 0 ? rawRatio / profile.volumeMultiplier : rawRatio;
+  let grade, score, note;
+  if (adjusted >= 2.0)      { grade = "CLIMAX";   score = 25; note = "Volume climax — accumulation signal"; }
+  else if (adjusted >= 1.2) { grade = "STRONG";   score = 20; note = `Above average for ${session}`; }
+  else if (adjusted >= 0.8) { grade = "ADEQUATE"; score = 10; note = `Normal for ${session}`; }
+  else if (adjusted >= 0.5) { grade = "WEAK";     score = 0;  note = `Below normal even for ${session}`; }
+  else                      { grade = "DEAD";     score = -15; note = "Dangerously low — skip"; }
+  return { raw: rawRatio, adjusted, grade, score, note, session };
 }
 
 // Extract the high/low range formed during the most recent Asian session candles
@@ -312,7 +395,7 @@ function scoreToken(data, btcData) {
   // Playbook: volume on the signal candle itself must exceed 20MA
   const signalCandleVolOk = avgVol20 > 0 && volumes1h[volumes1h.length - 1] > avgVol20;
 
-  const { pattern, bullish } = detectCandlePattern(candles1h);
+  const { pattern, bullish, confirmationStrength } = detectCandlePattern(candles1h);
   const { supports, resistances, nearSupport } = findSupportResistance(candles1h);
   const fvg = detectFVG(candles1h);
 
@@ -320,6 +403,9 @@ function scoreToken(data, btcData) {
   const sessionInfo    = getSessionInfo();
   const asianRange     = detectAsianRange(candles1h);
   const liquiditySweep = detectLiquiditySweep(candles1h, supports, resistances, asianRange);
+
+  // Session-adjusted volume
+  const sessionVolume = getSessionAdjustedVolume(volRatio, sessionInfo.session);
 
   // New indicators
   const macd = calcMACD(closes1h);
@@ -356,107 +442,118 @@ function scoreToken(data, btcData) {
   const idx24hAgo = Math.max(0, closes1h.length - 25);
   const change24h = closes1h[idx24hAgo] > 0 ? ((currentPrice - closes1h[idx24hAgo]) / closes1h[idx24hAgo]) * 100 : 0;
 
+  // ── HARD REJECTION GATES ──
+  // These prevent tokens from even being scored if they fundamentally fail
+  let hardReject = null;
+  if (!btcSafe)                        hardReject = "BTC dumping >3% on 4H";
+  else if (rsi1h !== null && rsi1h > 70) hardReject = "RSI overbought (>70)";
+  else if (sessionVolume.grade === "DEAD" && !isVolumeClimax)
+                                         hardReject = `Dead volume (${sessionVolume.adjusted.toFixed(2)}x session-adjusted)`;
+
   let score = 0;
   let reasons = [];
   let setupType = "None";
 
-  // ── RSI 1H scoring ──
-  if (rsi1h !== null) {
-    if (rsi1h >= 30 && rsi1h <= 40) { score += 30; reasons.push(`RSI 1H in primary zone (${rsi1h.toFixed(1)})`); }
-    else if (rsi1h > 40 && rsi1h <= 50) { score += 15; reasons.push(`RSI 1H neutral (${rsi1h.toFixed(1)})`); }
-    else if (rsi1h < 30) { score += 20; reasons.push(`RSI 1H deeply oversold (${rsi1h.toFixed(1)})`); }
-    else if (rsi1h > 70) { score -= 20; reasons.push(`RSI 1H overbought (${rsi1h.toFixed(1)})`); }
-  }
-
-  // ── Multi-TF RSI alignment ──
-  if (rsi1h !== null && rsi4h !== null) {
-    if (rsi1h < 40 && rsi4h < 40) { score += 15; reasons.push(`RSI aligned oversold (4H: ${rsi4h.toFixed(0)})`); }
-    else if (rsi1h > 65 && rsi4h > 65) { score -= 15; reasons.push(`RSI aligned overbought (4H: ${rsi4h.toFixed(0)})`); }
-    else if ((rsi1h < 40 && rsi4h > 60) || (rsi1h > 60 && rsi4h < 40)) { score -= 5; reasons.push(`RSI timeframe divergence (4H: ${rsi4h.toFixed(0)})`); }
-  }
-
-  // ── Structure + EMA ──
-  if (nearSupport) { score += 20; reasons.push("Price near key support level"); }
-  if (priceVsEMA > -2 && priceVsEMA < 2) { score += 10; reasons.push(`Near 200 EMA (${priceVsEMA > 0 ? "+" : ""}${priceVsEMA.toFixed(1)}%)`); }
-
-  // ── Volume scoring ──
-  if (volRatio > 1.2) { score += 15; reasons.push(`Volume ${volRatio.toFixed(1)}x above average`); }
-  else if (volRatio > 0.8) { score += 5; reasons.push("Adequate volume"); }
-  else { reasons.push("⚠ Low volume — weak conviction"); }
-  if (isVolumeClimax && nearSupport) { score += 10; reasons.push("Volume climax at support — accumulation"); }
-  else if (isVolumeClimax && nearResistance) { score -= 5; reasons.push("Volume climax at resistance — distribution risk"); }
-  
-  // ── Candle patterns ──
-  if (bullish && nearSupport) { score += 15; reasons.push(`${pattern} at support`); }
-  else if (bullish) { score += 5; reasons.push(pattern); }
-  if (fvg.found && fvg.inZone && rsi1h < 50) {
-    score += 20;
-    reasons.push(fvg.hasRejection ? "Price in FVG reclaim zone + rejection candle confirmed" : "Price in FVG reclaim zone (awaiting rejection candle)");
-  }
-
-  // ── MACD ──
-  if (macd) {
-    if (macd.bullishCross) { score += 15; reasons.push("MACD bullish crossover"); }
-    else if (macd.rising && macd.histogram < 0) { score += 5; reasons.push("MACD momentum improving"); }
-    if (macd.bearishCross) { score -= 10; reasons.push("MACD bearish crossover"); }
-  }
-
-  // ── Trend direction ──
-  if (closes1h.length >= 50) {
-    if (inUptrend && rsi1h < 45) { score += 10; reasons.push(`Dip in uptrend (EMA20 > EMA50 by ${trendStrength.toFixed(1)}%)`); }
-    else if (!inUptrend && rsi1h < 40) { score -= 10; reasons.push("Dip in downtrend — catching knife risk"); }
-  }
-
-  // ── Bollinger Bands ──
-  if (bb) {
-    if (bb.percentB < 0.15 && rsi1h < 40) { score += 15; reasons.push("Price at lower Bollinger Band + RSI oversold"); }
-    else if (bb.percentB < 0.2) { score += 5; reasons.push("Near lower Bollinger Band"); }
-    if (bb.squeeze) { score += 5; reasons.push("Bollinger squeeze — breakout imminent"); }
-    if (bb.percentB > 0.95 && rsi1h > 65) { score -= 10; reasons.push("At upper BB + RSI high — overextended"); }
-  }
-
-  // ── Momentum (ROC) ──
-  if (momentumImproving && rsi1h < 55) { score += 10; reasons.push(`Momentum improving (ROC: ${roc.toFixed(1)}%)`); }
-  else if (roc < -8) { score -= 5; reasons.push(`Momentum deteriorating (ROC: ${roc.toFixed(1)}%)`); }
-
-  // ── BTC risk ──
-  if (!btcSafe) { score -= 40; reasons.push(`⛔ BTC risk-off (${btcChange4h.toFixed(1)}% on 4H)`); }
-
-  // ── Liquidity sweep ──
-  if (liquiditySweep.detected && liquiditySweep.bullish) {
-    score += 15; reasons.push(`Liquidity sweep: ${liquiditySweep.label}`);
-  }
-  if (liquiditySweep.detected && !liquiditySweep.bullish) {
-    score -= 15; reasons.push(`Liquidity sweep: ${liquiditySweep.label}`);
-  }
-
-  // ── Session risk ──
-  if (sessionInfo.sessionTransitionRisk) {
-    score -= 10;
-    reasons.push(`Session risk: ${sessionInfo.nextSession} open in ${sessionInfo.minsToNext}min — stop hunt likely`);
-  }
-  if (asianRange?.isTight && sessionInfo.inAsian) {
-    reasons.push(`Asian range tight (${asianRange.rangePct.toFixed(2)}%) — big move expected at session open`);
-  }
-
-  // ── Setup detection ──
-  if (rsi1h >= 30 && rsi1h <= 40 && nearSupport && bullish && volRatio > 0.8 && btcSafe) {
-    if (signalCandleVolOk) {
-      setupType = "A: RSI + Structure"; score += 10;
-    } else {
-      reasons.push("⚠ Signal candle volume below 20MA — Setup A unconfirmed");
+  if (hardReject) {
+    reasons.push(`⛔ REJECTED: ${hardReject}`);
+    score = -50;
+  } else {
+    // ── RSI 1H scoring (weighted per playbook) ──
+    if (rsi1h !== null) {
+      if (rsi1h >= 30 && rsi1h <= 40)      { score += 25; reasons.push(`RSI 1H in primary zone (${rsi1h.toFixed(1)})`); }
+      else if (rsi1h > 40 && rsi1h <= 50)   { score += 10; reasons.push(`RSI 1H neutral (${rsi1h.toFixed(1)})`); }
+      else if (rsi1h < 30)                   { score += 15; reasons.push(`RSI 1H deeply oversold (${rsi1h.toFixed(1)})`); }
+      else if (rsi1h > 60)                   { score -= 10; reasons.push(`RSI 1H warm (${rsi1h.toFixed(1)})`); }
     }
-  } else if (fvg.found && fvg.inZone && rsi1h < 50 && btcSafe) {
-    setupType = fvg.hasRejection ? "B: FVG Reclaim ✓" : "B: FVG Reclaim";
-  } else if (rsi1h < 60 && change24h < 2 && btcSafe && score >= 40) {
-    setupType = "C: Momentum Candidate";
+
+    // ── Multi-TF RSI alignment ──
+    if (rsi1h !== null && rsi4h !== null) {
+      if (rsi1h < 40 && rsi4h < 40)           { score += 15; reasons.push(`RSI aligned oversold (4H: ${rsi4h.toFixed(0)})`); }
+      else if (rsi1h > 65 && rsi4h > 65)       { score -= 15; reasons.push(`RSI aligned overbought (4H: ${rsi4h.toFixed(0)})`); }
+      else if ((rsi1h < 40 && rsi4h > 60) || (rsi1h > 60 && rsi4h < 40)) { score -= 5; reasons.push(`RSI timeframe divergence (4H: ${rsi4h.toFixed(0)})`); }
+    }
+
+    // ── Structure + EMA ──
+    if (nearSupport)                           { score += 15; reasons.push("Price near key support level"); }
+    if (priceVsEMA > -2 && priceVsEMA < 2)    { score += 10; reasons.push(`Near 200 EMA (${priceVsEMA > 0 ? "+" : ""}${priceVsEMA.toFixed(1)}%)`); }
+
+    // ── Volume scoring (SESSION-ADJUSTED) ──
+    score += sessionVolume.score;
+    reasons.push(sessionVolume.grade === "DEAD"
+      ? `⚠ ${sessionVolume.note}`
+      : `Volume: ${sessionVolume.grade} (${volRatio.toFixed(2)}x raw → ${sessionVolume.adjusted.toFixed(2)}x ${sessionInfo.session}-adjusted)`
+    );
+    if (isVolumeClimax && nearSupport)       { score += 10; reasons.push("Volume climax at support — accumulation"); }
+    else if (isVolumeClimax && nearResistance) { score -= 5; reasons.push("Volume climax at resistance — distribution risk"); }
+
+    // ── Candle patterns (with confirmation strength) ──
+    if (confirmationStrength === "HIGH" && nearSupport) { score += 15; reasons.push(`✓ ${pattern} at support (confirmed)`); }
+    else if (confirmationStrength === "HIGH")          { score += 10; reasons.push(`${pattern} (confirmed)`); }
+    else if (bullish && nearSupport)                    { score += 5;  reasons.push(`${pattern} at support (weak — no confirmation)`); }
+    else if (bullish)                                   { score += 2;  reasons.push(`${pattern} (weak — needs confirmation candle)`); }
+
+    if (fvg.found && fvg.inZone && rsi1h < 50) {
+      score += 20;
+      reasons.push(fvg.hasRejection ? "Price in FVG reclaim zone + rejection candle confirmed" : "Price in FVG reclaim zone (awaiting rejection candle)");
+    }
+
+    // ── MACD ──
+    if (macd) {
+      if (macd.bullishCross)                        { score += 15; reasons.push("MACD bullish crossover"); }
+      else if (macd.rising && macd.histogram < 0)   { score += 5;  reasons.push("MACD momentum improving"); }
+      if (macd.bearishCross)                         { score -= 10; reasons.push("MACD bearish crossover"); }
+    }
+
+    // ── Trend direction ──
+    if (closes1h.length >= 50) {
+      if (inUptrend && rsi1h < 45) { score += 10; reasons.push(`Dip in uptrend (EMA20 > EMA50 by ${trendStrength.toFixed(1)}%)`); }
+      else if (!inUptrend && rsi1h < 40) { score -= 10; reasons.push("Dip in downtrend — catching knife risk"); }
+    }
+
+    // ── Bollinger Bands ──
+    if (bb) {
+      if (bb.percentB < 0.15 && rsi1h < 40)   { score += 15; reasons.push("Price at lower Bollinger Band + RSI oversold"); }
+      else if (bb.percentB < 0.2)              { score += 5;  reasons.push("Near lower Bollinger Band"); }
+      if (bb.squeeze)                           { score += 5;  reasons.push("Bollinger squeeze — breakout imminent"); }
+      if (bb.percentB > 0.95 && rsi1h > 65)    { score -= 10; reasons.push("At upper BB + RSI high — overextended"); }
+    }
+
+    // ── Momentum (ROC) ──
+    if (momentumImproving && rsi1h < 55) { score += 10; reasons.push(`Momentum improving (ROC: ${roc.toFixed(1)}%)`); }
+    else if (roc < -8)                    { score -= 5;  reasons.push(`Momentum deteriorating (ROC: ${roc.toFixed(1)}%)`); }
+
+    // ── Liquidity sweep ──
+    if (liquiditySweep.detected && liquiditySweep.bullish) {
+      score += 15; reasons.push(`Liquidity sweep: ${liquiditySweep.label}`);
+    }
+    if (liquiditySweep.detected && !liquiditySweep.bullish) {
+      score -= 15; reasons.push(`Liquidity sweep: ${liquiditySweep.label}`);
+    }
+
+    // ── Session risk ──
+    if (sessionInfo.sessionTransitionRisk) {
+      score -= 10;
+      reasons.push(`Session risk: ${sessionInfo.nextSession} open in ${sessionInfo.minsToNext}min — stop hunt likely`);
+    }
+    if (asianRange?.isTight && sessionInfo.inAsian) {
+      reasons.push(`Asian range tight (${asianRange.rangePct.toFixed(2)}%) — big move expected at session open`);
+    }
   }
 
-  // ── ATR-based trade levels ──
+  // ── PLAYBOOK TRADE LEVELS ──
+  // Always calculate using playbook fixed rules, not just ATR
+  const playbookTP1 = currentPrice * 1.035;
+  const playbookTP2 = currentPrice * 1.05;
+  const playbookStop = currentPrice * 0.98;
+  const playbookRiskPct = 2.0;
+  const playbookRR = 3.5 / 2.0; // TP1/Stop = 1.75, but blended (3.5+5)/2 / 2 = 2.13
+  const playbookBlendedRR = ((3.5 + 5.0) / 2) / 2.0;
+
+  // ATR-based trade levels (secondary reference)
   const nearestSupport = supports[0] || currentPrice * 0.98;
   const atrStop = atr ? currentPrice - (atr * 1.5) : currentPrice * 0.985;
   const supportStop = nearestSupport * 0.995;
-  const stopLoss = setupType.startsWith("C") ? (atr ? currentPrice - atr * 1.5 : currentPrice * 0.985) : Math.max(atrStop, supportStop);
+  const stopLoss = Math.max(atrStop, supportStop);
   const tp1 = atr ? currentPrice + atr * 2 : currentPrice * 1.035;
   const tp2 = atr ? currentPrice + atr * 3.5 : currentPrice * 1.05;
   const riskPct = ((currentPrice - stopLoss) / currentPrice) * 100;
@@ -465,23 +562,100 @@ function scoreToken(data, btcData) {
 
   // Session-adjusted stop — wider to survive Asian low sweep before the real move
   let sessionAdjustedStop = stopLoss;
-  if (asianRange && (sessionInfo.inAsian || sessionInfo.sessionTransitionRisk)) {
+  if (sessionInfo.stopBuffer > 0) {
+    const bufferAmount = currentPrice * sessionInfo.stopBuffer;
+    const bufferedStop = stopLoss - bufferAmount;
+    if (asianRange && (sessionInfo.inAsian || sessionInfo.sessionTransitionRisk)) {
+      const asianBuffer = asianRange.low * 0.995;
+      sessionAdjustedStop = Math.min(bufferedStop, asianBuffer);
+    } else {
+      sessionAdjustedStop = bufferedStop;
+    }
+  } else if (asianRange && (sessionInfo.inAsian || sessionInfo.sessionTransitionRisk)) {
     const asianBuffer = asianRange.low * 0.995;
     if (asianBuffer < stopLoss) sessionAdjustedStop = asianBuffer;
   }
 
-  // Playbook fixed TP levels (3.5% / 5.0%)
-  const playbookTP1 = currentPrice * 1.035;
-  const playbookTP2 = currentPrice * 1.05;
-  const playbookStop = currentPrice * 0.98;
+  // ── SETUP CLASSIFICATION (enhanced with forming/confirmed status) ──
+  // Check individual criteria for Setup A
+  const setupACriteria = {
+    rsiInZone: rsi1h !== null && rsi1h >= 30 && rsi1h <= 40,
+    atSupport: nearSupport,
+    candleConfirmed: confirmationStrength === "HIGH" && bullish,
+    volumeOk: sessionVolume.adjusted >= 0.8,  // session-adjusted
+    signalVolumeOk: signalCandleVolOk,
+    btcStable: btcSafe,
+  };
+  const setupAMet = Object.values(setupACriteria).filter(Boolean).length;
+  const setupATotal = Object.keys(setupACriteria).length;
+  const setupAMissing = Object.entries(setupACriteria).filter(([, v]) => !v).map(([k]) => k);
+
+  let setupStatus = "NONE"; // NONE | FORMING | CONFIRMED
+  if (hardReject) {
+    setupType = "None";
+    setupStatus = "REJECTED";
+  } else if (setupAMet === setupATotal) {
+    setupType = "A: RSI + Structure ✓";
+    setupStatus = "CONFIRMED";
+    score += 15;
+    reasons.push("✅ Setup A CONFIRMED — all criteria met");
+  } else if (setupAMet >= 4 && setupACriteria.rsiInZone && setupACriteria.btcStable) {
+    setupType = "A: RSI + Structure";
+    setupStatus = "FORMING";
+    score += 5;
+    reasons.push(`Setup A FORMING (${setupAMet}/${setupATotal}) — missing: ${setupAMissing.join(", ")}`);
+  } else if (fvg.found && fvg.inZone && rsi1h < 50 && btcSafe) {
+    setupType = fvg.hasRejection ? "B: FVG Reclaim ✓" : "B: FVG Reclaim";
+    setupStatus = fvg.hasRejection ? "CONFIRMED" : "FORMING";
+  } else if (rsi1h < 60 && change24h < 2 && btcSafe && score >= 40) {
+    setupType = "C: Momentum Candidate";
+    setupStatus = "FORMING";
+  }
+
+  // ── R:R Check (hard penalty if playbook R:R < 2.0) ──
+  if (setupType !== "None" && playbookBlendedRR < 2.0) {
+    score -= 20;
+    reasons.push(`⚠ Playbook R:R below 2:1 (${playbookBlendedRR.toFixed(2)}:1)`);
+  }
+
+  // ── PLAYBOOK CHECKLIST (pre-filled for AI export) ──
+  const btcCloses1h = btcData?.candles1h?.map(c => parseFloat(c[4])) || [];
+  const btcRsi1h = calcRSI(btcCloses1h);
+  const dailyBiasLongs = btcSafe && btcChange4h > -1 && (btcRsi1h === null || btcRsi1h > 40);
+  const hasActiveNarrative = (data.narrative || []).length > 0;
+
+  const playbookChecklist = {
+    btcNotDumping:       { pass: btcSafe, value: `BTC ${btcChange4h >= 0 ? "+" : ""}${btcChange4h.toFixed(2)}% on 4H` },
+    dailyBiasLongs:      { pass: dailyBiasLongs, value: dailyBiasLongs ? "BTC stable/green" : "BTC bearish structure" },
+    activeNarrative:     { pass: hasActiveNarrative, value: hasActiveNarrative ? (data.narrative || []).join(", ") : "None tagged" },
+    volumeAboveAvg:      { pass: sessionVolume.adjusted >= 0.8, value: `${sessionVolume.grade} (${volRatio.toFixed(2)}x raw → ${sessionVolume.adjusted.toFixed(2)}x adjusted)` },
+    noMajorEvents:       { pass: !sessionInfo.inDangerWindow, value: sessionInfo.inDangerWindow ? `${sessionInfo.nextSession} open in ${sessionInfo.minsToNext}min` : "No events detected" },
+    rsiInZone:           { pass: rsi1h !== null && rsi1h >= 30 && rsi1h <= 40, value: rsi1h !== null ? `RSI ${rsi1h.toFixed(1)}` : "N/A" },
+    candleConfirmation:  { pass: confirmationStrength === "HIGH" && bullish, value: confirmationStrength === "HIGH" ? `${pattern} (confirmed)` : `${pattern} (${confirmationStrength.toLowerCase()})` },
+  };
+  const checklistPassCount = Object.values(playbookChecklist).filter(c => c.pass).length;
+  const checklistTotal = Object.keys(playbookChecklist).length;
+  const checklistFailures = Object.entries(playbookChecklist).filter(([, c]) => !c.pass).map(([k, c]) => `${k}: ${c.value}`);
+
+  let checklistVerdict;
+  if (checklistPassCount === checklistTotal) checklistVerdict = "ALL CHECKS PASS — valid entry";
+  else if (checklistPassCount >= 5) checklistVerdict = `FORMING — ${checklistTotal - checklistPassCount} check(s) failing`;
+  else checklistVerdict = "WAIT — too many checks failing";
 
   return {
     rsi1h, rsi4h, currentPrice, ema200: currentEMA200, priceVsEMA,
-    volRatio, pattern, bullish, supports, resistances, nearSupport,
-    fvg, btcChange4h, btcSafe, change24h, score, reasons, setupType,
+    volRatio, pattern, bullish, confirmationStrength, supports, resistances, nearSupport,
+    fvg, btcChange4h, btcSafe, change24h, score, reasons, setupType, setupStatus,
     stopLoss, tp1, tp2, riskPct, rrRatio,
-    playbookTP1, playbookTP2, playbookStop, signalCandleVolOk,
-    entry: setupType !== "None" && btcSafe,
+    playbookTP1, playbookTP2, playbookStop, playbookBlendedRR, signalCandleVolOk,
+    entry: setupStatus === "CONFIRMED" || (setupStatus === "FORMING" && setupType !== "None"),
+    hardReject,
+    // Setup A details
+    setupACriteria, setupAMet, setupATotal, setupAMissing,
+    // Session-adjusted volume
+    sessionVolume,
+    // Playbook checklist
+    playbookChecklist, checklistPassCount, checklistTotal, checklistFailures, checklistVerdict,
     macd, inUptrend, trendStrength, atr, bb, roc, momentumImproving,
     volSpike, volContext, isVolumeClimax,
     sessionInfo, asianRange, liquiditySweep, sessionAdjustedStop,
@@ -492,7 +666,11 @@ function scoreToken(data, btcData) {
 function buildExportPayload(symbol, name, narrative, analysis, btcAnalysis) {
   const a = analysis;
   return {
-    _instruction: "Analyze this token setup. Ask me for 1H and 4H chart screenshots if the setup looks strong. Focus on whether this is a valid entry or if I should wait.",
+    _instruction: a.setupStatus === "CONFIRMED"
+      ? "This token has a CONFIRMED setup. Verify with chart screenshots (1H + 4H) and provide exact entry/exit levels."
+      : a.setupStatus === "FORMING"
+        ? "This token has a FORMING setup. Ask me for 1H and 4H chart screenshots to check if the missing criteria are close to being met."
+        : "Analyze this token setup. Focus on whether this is a valid entry or if I should wait.",
     token: { symbol: symbol.replace("USDT", ""), pair: symbol, name, narratives: narrative || [] },
     scanTime: new Date().toISOString(),
     session: {
@@ -501,6 +679,7 @@ function buildExportPayload(symbol, name, narrative, analysis, btcAnalysis) {
       minsToNext: a.sessionInfo?.minsToNext,
       dangerWindow: a.sessionInfo?.inDangerWindow,
       transitionRisk: a.sessionInfo?.sessionTransitionRisk,
+      rules: a.sessionInfo?.rules || null,
     },
     btc: {
       safe: a.btcSafe,
@@ -536,13 +715,17 @@ function buildExportPayload(symbol, name, narrative, analysis, btcAnalysis) {
       ema20vsEma50: +a.trendStrength.toFixed(2),
     },
     volume: {
-      ratio: +a.volRatio.toFixed(2),
+      raw: +a.volRatio.toFixed(2),
+      sessionAdjusted: +a.sessionVolume.adjusted.toFixed(2),
+      grade: a.sessionVolume.grade,
+      note: a.sessionVolume.note,
       spike: +a.volSpike.toFixed(2),
       climax: a.isVolumeClimax,
       context: a.volContext,
     },
     structure: {
       pattern: a.pattern,
+      confirmationStrength: a.confirmationStrength,
       bullishCandle: a.bullish,
       nearSupport: a.nearSupport,
       supports: a.supports.map(s => +s.toFixed(6)),
@@ -563,18 +746,34 @@ function buildExportPayload(symbol, name, narrative, analysis, btcAnalysis) {
     } : null,
     setup: {
       type: a.setupType,
+      status: a.setupStatus,
       score: a.score,
       entry: a.entry,
       reasons: a.reasons,
+      // Setup A breakdown
+      setupACriteria: a.setupACriteria || null,
+      setupAMet: a.setupAMet || 0,
+      setupATotal: a.setupATotal || 0,
+      setupAMissing: a.setupAMissing || [],
+    },
+    playbookChecklist: {
+      ...a.playbookChecklist,
+      passCount: `${a.checklistPassCount}/${a.checklistTotal}`,
+      failures: a.checklistFailures,
+      verdict: a.checklistVerdict,
     },
     tradeLevels: {
       entry: a.currentPrice,
       stopLoss: a.stopLoss,
       sessionAdjustedStop: a.sessionAdjustedStop !== a.stopLoss ? a.sessionAdjustedStop : null,
+      playbookStop: a.playbookStop,
       tp1: a.tp1,
       tp2: a.tp2,
+      playbookTP1: a.playbookTP1,
+      playbookTP2: a.playbookTP2,
       riskPct: +a.riskPct.toFixed(2),
       rrRatio: +a.rrRatio.toFixed(2),
+      playbookRR: +a.playbookBlendedRR.toFixed(2),
     },
   };
 }
@@ -1321,7 +1520,7 @@ export default function App() {
               )}
               <span style={{ width: 1, height: 10, background: "#2a2a3e", display: "inline-block" }} />
               <span style={{ fontSize: 9, fontWeight: 700, color: sessionInfo.sessionColor, letterSpacing: 0.5 }}>
-                ● {sessionInfo.session}
+                ● {sessionInfo.session} <span style={{ color: "#6b7280", fontWeight: 500 }}>vol×{sessionInfo.volumeMultiplier}</span>
               </span>
               <span style={{ fontSize: 9, color: sessionInfo.inDangerWindow ? "#fb923c" : "#4b5563" }}>
                 ⏱ {sessionInfo.nextSession} in {sessionInfo.hoursToNext > 0 ? `${sessionInfo.hoursToNext}h ` : ""}{sessionInfo.minsRemaining}m
@@ -1448,10 +1647,15 @@ export default function App() {
             <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
               {shortlist.map(t => (
                 <span key={t.symbol} style={{
-                  background: "#312e81", color: "#c7d2fe", padding: "3px 8px",
+                  background: t.analysis.setupStatus === "CONFIRMED" ? "#166534" : "#312e81",
+                  color: t.analysis.setupStatus === "CONFIRMED" ? "#4ade80" : "#c7d2fe",
+                  padding: "3px 8px",
                   borderRadius: 5, fontSize: 12, fontWeight: 700,
+                  border: t.analysis.setupStatus === "CONFIRMED" ? "1px solid #22c55e40" : "none",
                 }}>
-                  {t.name} <span style={{ fontFamily: "var(--mono)", color: "#a5b4fc", fontSize: 10 }}>{t.analysis.score}</span>
+                  {t.name} <span style={{ fontFamily: "var(--mono)", color: t.analysis.setupStatus === "CONFIRMED" ? "#86efac" : "#a5b4fc", fontSize: 10 }}>
+                    {t.analysis.score} {t.analysis.setupStatus === "CONFIRMED" ? "✓" : t.analysis.setupStatus === "FORMING" ? "◐" : ""}
+                  </span>
                 </span>
               ))}
             </div>
@@ -1646,6 +1850,15 @@ export default function App() {
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
                         <span style={{ fontSize: 11, color: analysis.setupType !== "None" ? "#fbbf24" : "#4b5563", fontWeight: 600 }}>{analysis.setupType}</span>
+                        {analysis.setupStatus === "CONFIRMED" && (
+                          <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1, padding: "2px 5px", borderRadius: 3, background: "#16653440", color: "#4ade80", border: "1px solid #16653460" }}>CONFIRMED</span>
+                        )}
+                        {analysis.setupStatus === "FORMING" && (
+                          <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1, padding: "2px 5px", borderRadius: 3, background: "#854d0e30", color: "#fbbf24", border: "1px solid #854d0e50" }}>FORMING</span>
+                        )}
+                        {analysis.setupStatus === "REJECTED" && (
+                          <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1, padding: "2px 5px", borderRadius: 3, background: "#7f1d1d30", color: "#f87171", border: "1px solid #7f1d1d50" }}>REJECTED</span>
+                        )}
                         {narrative && narrative.length > 0 && <NarrativeTags narratives={narrative} />}
                       </div>
                     </div>
@@ -1681,10 +1894,13 @@ export default function App() {
                     </div>
                     <div>
                       <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1.2, marginBottom: 3 }}>VOLUME</div>
-                      <span style={{
-                        fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700,
-                        color: analysis.volRatio > 1.2 ? "#4ade80" : analysis.volRatio > 0.8 ? "#fbbf24" : "#f87171",
-                      }}>{analysis.volRatio.toFixed(2)}x</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <span style={{
+                          fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700,
+                          color: analysis.sessionVolume?.grade === "CLIMAX" ? "#22c55e" : analysis.sessionVolume?.grade === "STRONG" ? "#4ade80" : analysis.sessionVolume?.grade === "ADEQUATE" ? "#fbbf24" : "#f87171",
+                        }}>{analysis.sessionVolume ? analysis.sessionVolume.adjusted.toFixed(2) : analysis.volRatio.toFixed(2)}x</span>
+                        <span style={{ fontSize: 8, color: "#6b7280", fontWeight: 600 }}>{analysis.sessionVolume?.grade || ""}</span>
+                      </div>
                     </div>
                     <div>
                       <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1.2, marginBottom: 3 }}>SIGNAL</div>
@@ -1728,6 +1944,51 @@ export default function App() {
                       ))}
                     </div>
 
+                    {/* Playbook Checklist */}
+                    {analysis.playbookChecklist && (
+                      <div style={{ marginTop: 14, background: "rgba(30,27,75,0.3)", border: "1px solid #312e8140", borderRadius: 10, padding: 12 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                          <div style={{ fontSize: 10, color: "#a5b4fc", fontWeight: 800, letterSpacing: 1.5 }}>📋 PLAYBOOK CHECKLIST</div>
+                          <span style={{
+                            fontSize: 10, fontWeight: 800, fontFamily: "var(--mono)",
+                            color: analysis.checklistPassCount === analysis.checklistTotal ? "#4ade80" : analysis.checklistPassCount >= 5 ? "#fbbf24" : "#f87171",
+                          }}>{analysis.checklistPassCount}/{analysis.checklistTotal}</span>
+                        </div>
+                        {Object.entries(analysis.playbookChecklist).map(([key, check]) => (
+                          <div key={key} style={{ display: "flex", alignItems: "center", gap: 6, padding: "3px 0", fontSize: 11 }}>
+                            <span style={{ fontSize: 13, flexShrink: 0 }}>{check.pass ? "✅" : "❌"}</span>
+                            <span style={{ color: "#94a3b8", fontWeight: 600 }}>{key.replace(/([A-Z])/g, ' $1').trim()}</span>
+                            <span style={{ color: check.pass ? "#4ade8090" : "#f8717190", fontSize: 10, fontFamily: "var(--mono)" }}>{check.value}</span>
+                          </div>
+                        ))}
+                        <div style={{ marginTop: 8, padding: "6px 8px", borderRadius: 6,
+                          background: analysis.checklistPassCount === analysis.checklistTotal ? "rgba(22,101,52,0.2)" : analysis.checklistPassCount >= 5 ? "rgba(133,77,14,0.15)" : "rgba(127,29,29,0.15)",
+                          fontSize: 10, fontWeight: 700,
+                          color: analysis.checklistPassCount === analysis.checklistTotal ? "#4ade80" : analysis.checklistPassCount >= 5 ? "#fbbf24" : "#f87171",
+                        }}>
+                          {analysis.checklistVerdict}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Session Volume Context */}
+                    {analysis.sessionVolume && (
+                      <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 7, background: "rgba(10,10,18,0.6)", border: "1px solid #1e1e2e" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <span style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1 }}>SESSION VOLUME</span>
+                          <span style={{
+                            fontSize: 10, fontWeight: 700, fontFamily: "var(--mono)",
+                            color: analysis.sessionVolume.grade === "CLIMAX" ? "#22c55e" : analysis.sessionVolume.grade === "STRONG" ? "#4ade80" : analysis.sessionVolume.grade === "ADEQUATE" ? "#fbbf24" : "#f87171",
+                          }}>{analysis.sessionVolume.grade}</span>
+                        </div>
+                        <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 3 }}>
+                          Raw: <span style={{ fontFamily: "var(--mono)", color: "#e2e8f0" }}>{analysis.volRatio.toFixed(2)}x</span>
+                          {" → "}{analysis.sessionInfo?.session}-adjusted: <span style={{ fontFamily: "var(--mono)", color: "#e2e8f0" }}>{analysis.sessionVolume.adjusted.toFixed(2)}x</span>
+                        </div>
+                        <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>{analysis.sessionVolume.note}</div>
+                      </div>
+                    )}
+
                     {/* Grid Data */}
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 14 }}>
                       {[
@@ -1740,7 +2001,8 @@ export default function App() {
                         ["FVG", analysis.fvg.found ? (analysis.fvg.inZone ? "In Zone" : "Near") : "None", analysis.fvg.found ? "#fbbf24" : "#6b7280"],
                         ["ROC", `${analysis.roc.toFixed(1)}%`, analysis.roc > 0 ? "#4ade80" : "#f87171"],
                         ["Vol Spike", analysis.isVolumeClimax ? analysis.volContext : "Normal", analysis.volContext === "accumulation" ? "#4ade80" : analysis.volContext === "distribution" ? "#f87171" : null],
-                        ["Session", analysis.sessionInfo?.session || "—", analysis.sessionInfo?.sessionColor || null],
+                        ["Session", `${analysis.sessionInfo?.session || "—"} ×${analysis.sessionInfo?.volumeMultiplier || "?"}`, analysis.sessionInfo?.sessionColor || null],
+                        ["Vol Adj", analysis.sessionVolume ? `${analysis.sessionVolume.adjusted.toFixed(1)}x ${analysis.sessionVolume.grade}` : "—", analysis.sessionVolume?.grade === "STRONG" || analysis.sessionVolume?.grade === "CLIMAX" ? "#4ade80" : analysis.sessionVolume?.grade === "ADEQUATE" ? "#fbbf24" : "#f87171"],
                         ["Liquidity", analysis.liquiditySweep?.detected ? (analysis.liquiditySweep.bullish ? "Sweep ↑" : "Sweep ↓") : "None", analysis.liquiditySweep?.detected ? (analysis.liquiditySweep.bullish ? "#86efac" : "#fca5a5") : "#4b5563"],
                       ].map(([label, val, color]) => (
                         <div key={label}>
