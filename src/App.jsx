@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { db, ref, set, onValue, FIREBASE_ENABLED } from "./firebase.js";
+import ExternalFactorsPanel from "./ExternalFactorsPanel";
 
 // ─── Token Config ───────────────────────────────────────────────
 const DEFAULT_TOKENS = [
@@ -1218,6 +1219,8 @@ export default function App() {
   const [selected, setSelected] = useState(new Set());
   const [searchQuery, setSearchQuery] = useState("");
   const [syncStatus, setSyncStatus] = useState(FIREBASE_ENABLED ? "syncing" : "offline");
+  const [tokenNews, setTokenNews] = useState({});   // { [symbol]: { articles, fetching, loaded } }
+  const [newsOpen, setNewsOpen]   = useState(new Set()); // symbols with news panel open
   const timerRef = useRef(null);
   const firebaseSyncRef = useRef(false); // true = local write in-flight, suppress incoming onValue echo
   const remoteUpdateRef = useRef(false); // true = processing remote data, skip trades/watchlist write-backs
@@ -1304,6 +1307,39 @@ export default function App() {
       }
     }
     setRefreshingSymbol(null);
+  };
+
+  const fetchTokenNews = async (symbol, name) => {
+    setTokenNews(prev => ({ ...prev, [symbol]: { ...(prev[symbol] || {}), fetching: true } }));
+    const ticker = symbol.replace("USDT", "").toLowerCase();
+    const nameQ  = name.toLowerCase();
+    try {
+      const res  = await fetch("https://min-api.cryptocompare.com/data/v2/news/?lang=EN&sortOrder=latest&limit=50");
+      const data = await res.json();
+      const articles = (data?.Data || []).filter(a => {
+        const text = `${a.title || ""} ${a.categories || ""} ${a.body || ""}`.toLowerCase();
+        return text.includes(ticker) || text.includes(nameQ);
+      });
+      setTokenNews(prev => ({ ...prev, [symbol]: { articles, fetching: false, loaded: true } }));
+    } catch {
+      setTokenNews(prev => ({ ...prev, [symbol]: { articles: [], fetching: false, loaded: true } }));
+    }
+  };
+
+  const toggleTokenNews = (e, symbol, name) => {
+    e.stopPropagation();
+    setNewsOpen(prev => {
+      const next = new Set(prev);
+      if (next.has(symbol)) {
+        next.delete(symbol);
+      } else {
+        next.add(symbol);
+        if (!tokenNews[symbol]?.loaded && !tokenNews[symbol]?.fetching) {
+          fetchTokenNews(symbol, name);
+        }
+      }
+      return next;
+    });
   };
 
   const refreshBTC = async () => {
@@ -1564,6 +1600,9 @@ export default function App() {
       </header>
 
       <main style={{ maxWidth: 600, margin: "0 auto", padding: "12px 12px 100px" }}>
+
+        {/* ── External Factors Panel ── */}
+        <ExternalFactorsPanel />
 
         {/* ── BTC 1H Crash Alert ── */}
         {btcCrashing && hasActiveTrades && (
@@ -1909,9 +1948,16 @@ export default function App() {
                         }}>★</button>
                         <button onClick={(e) => { e.stopPropagation(); refreshIndividualToken(symbol); }} disabled={refreshingSymbol === symbol} style={{
                           background: "none", border: "none", cursor: "pointer", padding: 0,
-                          fontSize: 13, color: "#6b7280", lineHeight: 1, 
+                          fontSize: 13, color: "#6b7280", lineHeight: 1,
                         }}>
                           <div className={refreshingSymbol === symbol ? "spin" : ""}>⟳</div>
+                        </button>
+                        <button onClick={(e) => toggleTokenNews(e, symbol, name)} style={{
+                          background: "none", border: "none", cursor: "pointer", padding: 0,
+                          fontSize: 12, lineHeight: 1,
+                          color: newsOpen.has(symbol) ? "#818cf8" : tokenNews[symbol]?.fetching ? "#eab308" : "#374151",
+                        }}>
+                          {tokenNews[symbol]?.fetching ? <span className="spin" style={{ display: "inline-block", fontSize: 11 }}>◌</span> : "📰"}
                         </button>
                       </div>
                     </div>
@@ -2152,6 +2198,63 @@ export default function App() {
                         </div>
                       </div>
                     )}
+
+                    {/* Token News Panel (on-demand) */}
+                    {newsOpen.has(symbol) && (
+                      <div style={{ marginTop: 10 }}>
+                        <div style={{ fontSize: 9, fontWeight: 800, color: "#6b7280", letterSpacing: 1.5, marginBottom: 6 }}>
+                          📰 {name.toUpperCase()} NEWS
+                        </div>
+                        {tokenNews[symbol]?.fetching ? (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            {[1, 2].map(i => <div key={i} className="shimmer" style={{ height: 34, borderRadius: 6 }} />)}
+                          </div>
+                        ) : !tokenNews[symbol]?.articles?.length ? (
+                          <div style={{ fontSize: 10, color: "#374151", padding: "10px 0", textAlign: "center" }}>
+                            No recent news found for {name}
+                          </div>
+                        ) : (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 200, overflowY: "auto" }}>
+                            {tokenNews[symbol].articles.slice(0, 6).map((a, i) => (
+                              <a key={i} href={a.url} target="_blank" rel="noopener noreferrer"
+                                onClick={e => e.stopPropagation()}
+                                style={{
+                                  display: "block", background: "#1a1a2e", border: "1px solid #2a2a3e",
+                                  borderRadius: 6, padding: "6px 8px", textDecoration: "none",
+                                }}>
+                                <div style={{ fontSize: 10, color: "#e2e8f0", lineHeight: 1.4 }}>
+                                  {(a.title || "").slice(0, 90)}{(a.title || "").length > 90 ? "…" : ""}
+                                </div>
+                                <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>
+                                  {a.source_info?.name || a.source || "—"}
+                                  {a.published_on ? ` · ${new Date(a.published_on * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}
+                                </div>
+                              </a>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Unlock Reminder */}
+                    <div style={{
+                      display: "flex", alignItems: "center", gap: 8, marginTop: 10,
+                      padding: "7px 10px", borderRadius: 8,
+                      background: "#12121e", border: "1px solid #1e1e2e",
+                    }}>
+                      <span style={{ fontSize: 13 }}>🔒</span>
+                      <div style={{ flex: 1, fontSize: 10, color: "#6b7280" }}>
+                        Check token unlocks before entry
+                      </div>
+                      <a
+                        href={`https://token.unlocks.app/${symbol.replace("USDT", "").toLowerCase()}`}
+                        target="_blank" rel="noopener noreferrer"
+                        onClick={e => e.stopPropagation()}
+                        style={{ fontSize: 9, fontWeight: 700, color: "#818cf8", textDecoration: "none", whiteSpace: "nowrap" }}
+                      >
+                        unlocks.app →
+                      </a>
+                    </div>
 
                     {/* Export for AI */}
                     <button
