@@ -904,189 +904,6 @@ function NarrativeTags({ narratives }) {
   );
 }
 
-// ─── Trade Manager Component ─────────────────────────────────────
-function TradeManager({ symbol, currentPrice, riskPct, rsi1h, trades, setTrades }) {
-  const trade = trades[symbol];
-  const [priceInput, setPriceInput] = useState(currentPrice);
-  const [capitalInput, setCapitalInput] = useState("");
-  const [portfolioInput, setPortfolioInput] = useState("");
-
-  const handleStartTrade = () => {
-    const p = parseFloat(priceInput);
-    const c = parseFloat(capitalInput);
-    if (!p || !c) return;
-    setTrades(prev => ({
-      ...prev,
-      [symbol]: {
-        isActive: true,
-        entries: [{ price: p, capital: c, date: new Date().toISOString() }],
-        totalCapital: c,
-        avgEntryPrice: p
-      }
-    }));
-    setCapitalInput("");
-  };
-
-  const handleDCA = () => {
-    const p = parseFloat(priceInput);
-    const c = parseFloat(capitalInput);
-    if (!p || !c || !trade) return;
-
-    const newEntries = [...trade.entries, { price: p, capital: c, date: new Date().toISOString() }];
-    const newTotalCapital = trade.totalCapital + c;
-    const totalTokens = newEntries.reduce((acc, entry) => acc + (entry.capital / entry.price), 0);
-    const newAvgPrice = newTotalCapital / totalTokens;
-
-    setTrades(prev => ({
-      ...prev,
-      [symbol]: {
-        ...prev[symbol],
-        entries: newEntries,
-        totalCapital: newTotalCapital,
-        avgEntryPrice: newAvgPrice
-      }
-    }));
-    setCapitalInput("");
-  };
-
-  const handleClose = () => {
-    setTrades(prev => {
-      const copy = { ...prev };
-      delete copy[symbol];
-      return copy;
-    });
-  };
-
-  // PNL Math
-  let pnlUsd = 0, pnlPct = 0, currentValue = 0, tokensOwned = 0;
-  if (trade?.isActive) {
-    tokensOwned = trade.totalCapital / trade.avgEntryPrice;
-    currentValue = tokensOwned * currentPrice;
-    pnlUsd = currentValue - trade.totalCapital;
-    pnlPct = (pnlUsd / trade.totalCapital) * 100;
-  }
-
-  // Hold time
-  const hoursElapsed = trade?.isActive && trade.entries?.[0]?.date
-    ? (Date.now() - new Date(trade.entries[0].date)) / 3600000 : 0;
-  const holdColor = hoursElapsed >= 48 ? "#ef4444" : hoursElapsed >= 36 ? "#fb923c" : "#6b7280";
-
-  // Playbook position sizing — 2% rule, capped at portfolio (spot = no leverage)
-  const portfolio = parseFloat(portfolioInput);
-  const stopPct = riskPct > 0 ? riskPct : 2;
-  const rawSize = portfolio > 0 ? (portfolio * 0.02) / (stopPct / 100) : null;
-  const suggestedSize = rawSize !== null ? Math.min(rawSize, portfolio) : null;
-  const isCapped = rawSize !== null && rawSize > portfolio;
-  const maxLossUsd = suggestedSize !== null ? suggestedSize * (stopPct / 100) : null;
-  const maxLossPct = maxLossUsd !== null && portfolio > 0 ? (maxLossUsd / portfolio) * 100 : null;
-
-  return (
-    <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 14, background: "#1a1a2e", border: "1px solid #312e8180", borderRadius: 10, padding: 14 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <span style={{ fontSize: 10, color: "#a5b4fc", fontWeight: 800, letterSpacing: 1.5 }}>💼 TRADE MANAGEMENT</span>
-        {trade?.isActive && (
-          <button onClick={handleClose} style={{ background: "#ef444420", color: "#f87171", border: "1px solid #ef444440", padding: "4px 8px", borderRadius: 6, fontSize: 9, fontWeight: 700, cursor: "pointer" }}>CLOSE TRADE</button>
-        )}
-      </div>
-
-      {/* RSI overbought early exit alert */}
-      {trade?.isActive && rsi1h > 75 && (
-        <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid #ef444450", borderRadius: 7, padding: "7px 10px", marginBottom: 10, fontSize: 11, color: "#f87171", fontWeight: 700 }}>
-          ⚠ RSI {rsi1h?.toFixed(0)} — Overbought. Playbook: consider early exit.
-        </div>
-      )}
-
-      {!trade?.isActive ? (
-        <div>
-          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 4 }}>ENTRY PRICE</div>
-              <input type="number" value={priceInput} onChange={e => setPriceInput(e.target.value)} style={{ width: "100%", background: "#12121e", border: "1px solid #2a2a3e", borderRadius: 6, padding: "8px", color: "#e2e8f0", fontSize: 13, fontFamily: "var(--mono)", outline: "none" }} />
-            </div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 4 }}>CAPITAL (USD)</div>
-              <input type="number" placeholder="0.00" value={capitalInput} onChange={e => setCapitalInput(e.target.value)} style={{ width: "100%", background: "#12121e", border: "1px solid #2a2a3e", borderRadius: 6, padding: "8px", color: "#e2e8f0", fontSize: 13, fontFamily: "var(--mono)", outline: "none" }} />
-            </div>
-            <div style={{ display: "flex", alignItems: "flex-end" }}>
-              <button onClick={handleStartTrade} style={{ background: "#818cf8", color: "#fff", border: "none", borderRadius: 6, padding: "8px 16px", fontWeight: 700, fontSize: 12, cursor: "pointer", height: 35 }}>START</button>
-            </div>
-          </div>
-          {/* Position sizing calculator */}
-          <div style={{ background: "#0d0d18", border: "1px solid #1e1e2e", borderRadius: 7, padding: "8px 10px" }}>
-            <div style={{ fontSize: 9, color: "#a78bfa", fontWeight: 700, letterSpacing: 1, marginBottom: 6 }}>PLAYBOOK POSITION SIZER (2% RULE)</div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: suggestedSize ? 8 : 0 }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 3 }}>PORTFOLIO ($)</div>
-                <input type="number" placeholder="e.g. 1000" value={portfolioInput} onChange={e => setPortfolioInput(e.target.value)} style={{ width: "100%", background: "#12121e", border: "1px solid #2a2a3e", borderRadius: 6, padding: "6px 8px", color: "#e2e8f0", fontSize: 12, fontFamily: "var(--mono)", outline: "none" }} />
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 3 }}>STOP LOSS %</div>
-                <div style={{ fontSize: 13, fontFamily: "var(--mono)", fontWeight: 700, color: "#f87171", padding: "6px 0" }}>{stopPct.toFixed(1)}%</div>
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 3 }}>POSITION SIZE</div>
-                <div style={{ fontSize: 13, fontFamily: "var(--mono)", fontWeight: 700, color: suggestedSize ? "#a78bfa" : "#4b5563" }}>
-                  {suggestedSize ? `$${suggestedSize.toFixed(0)}` : "—"}
-                </div>
-              </div>
-            </div>
-            {suggestedSize && (
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", paddingTop: 6, borderTop: "1px solid #1e1e2e" }}>
-                <span style={{ fontSize: 10, color: "#6b7280" }}>
-                  Max loss: <span style={{ color: "#f87171", fontFamily: "var(--mono)", fontWeight: 700 }}>${maxLossUsd.toFixed(2)}</span>
-                  <span style={{ color: "#4b5563" }}> ({maxLossPct.toFixed(2)}% of portfolio)</span>
-                </span>
-                {isCapped && (
-                  <span style={{ fontSize: 9, fontWeight: 700, color: "#fbbf24", background: "#fbbf2415", border: "1px solid #fbbf2430", borderRadius: 4, padding: "2px 6px" }}>
-                    CAPPED — SPOT LIMIT
-                  </span>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      ) : (
-        <div>
-          {/* Hold time warning */}
-          {hoursElapsed > 0 && (
-            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, padding: "5px 8px", background: "#0d0d18", borderRadius: 6, border: `1px solid ${holdColor}40` }}>
-              <span style={{ fontSize: 10, color: holdColor, fontWeight: 700 }}>
-                ⏱ {hoursElapsed >= 48 ? "⚠ EXCEEDED" : `${hoursElapsed.toFixed(0)}H`} / 48H MAX
-              </span>
-              {hoursElapsed >= 48 && <span style={{ fontSize: 9, color: "#ef4444" }}>— Playbook: exit now</span>}
-              {hoursElapsed >= 36 && hoursElapsed < 48 && <span style={{ fontSize: 9, color: "#fb923c" }}>— approaching limit</span>}
-            </div>
-          )}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 14, paddingBottom: 14, borderBottom: "1px solid #2a2a3e" }}>
-            <div>
-              <div style={{ fontSize: 9, color: "#6b7280" }}>AVG ENTRY</div>
-              <div style={{ fontSize: 13, fontFamily: "var(--mono)", fontWeight: 700 }}>${fp(trade.avgEntryPrice)}</div>
-            </div>
-            <div>
-              <div style={{ fontSize: 9, color: "#6b7280" }}>INVESTED</div>
-              <div style={{ fontSize: 13, fontFamily: "var(--mono)", fontWeight: 700 }}>${trade.totalCapital.toFixed(2)}</div>
-            </div>
-            <div>
-              <div style={{ fontSize: 9, color: "#6b7280" }}>PNL</div>
-              <div style={{ fontSize: 13, fontFamily: "var(--mono)", fontWeight: 800, color: pnlUsd >= 0 ? "#4ade80" : "#f87171" }}>
-                {pnlUsd >= 0 ? "+" : ""}{pnlUsd.toFixed(2)} ({pnlPct.toFixed(2)}%)
-              </div>
-            </div>
-          </div>
-
-          <div style={{ fontSize: 9, color: "#a5b4fc", marginBottom: 6, fontWeight: 700 }}>ADD DCA POSITION</div>
-          <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
-            <input type="number" placeholder="Price" value={priceInput} onChange={e => setPriceInput(e.target.value)} style={{ flex: 1, background: "#12121e", border: "1px solid #2a2a3e", borderRadius: 6, padding: "8px", color: "#e2e8f0", fontSize: 12, fontFamily: "var(--mono)", outline: "none" }} />
-            <input type="number" placeholder="Amount (USD)" value={capitalInput} onChange={e => setCapitalInput(e.target.value)} style={{ flex: 1, background: "#12121e", border: "1px solid #2a2a3e", borderRadius: 6, padding: "8px", color: "#e2e8f0", fontSize: 12, fontFamily: "var(--mono)", outline: "none" }} />
-          </div>
-          <button onClick={handleDCA} style={{ width: "100%", background: "#4ade8020", color: "#4ade80", border: "1px solid #4ade8040", borderRadius: 6, padding: "9px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>DCA</button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-
 // ─── Settings Modal ──────────────────────────────────────────────
 function SettingsModal({ tokens, onSave, onClose }) {
   const [list, setList] = useState(tokens.filter(t => t.role === "alt"));
@@ -1196,10 +1013,6 @@ export default function App() {
     catch { return DEFAULT_TOKENS; }
   });
   const [data, setData] = useState({});
-  const [trades, setTrades] = useState(() => {
-    try { const saved = localStorage.getItem("pb_trades"); return saved ? JSON.parse(saved) : {}; }
-    catch { return {}; }
-  });
   const [loading, setLoading] = useState(true);
   const [refreshingSymbol, setRefreshingSymbol] = useState(null); // specific token loader
   const [refreshingBTC, setRefreshingBTC] = useState(false);
@@ -1240,7 +1053,6 @@ export default function App() {
       if (remote) {
         remoteUpdateRef.current = true; // block trades/watchlist write-backs during hydration
         if (remote.tokens) setTokens(remote.tokens);
-        if (remote.trades) setTrades(remote.trades);
         if (remote.watchlist) setWatchlist(new Set(remote.watchlist));
         setTimeout(() => { remoteUpdateRef.current = false; }, 500);
       }
@@ -1251,15 +1063,6 @@ export default function App() {
     });
     return () => unsub();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Persist trades ──
-  useEffect(() => {
-    localStorage.setItem("pb_trades", JSON.stringify(trades));
-    if (FIREBASE_ENABLED && db && !remoteUpdateRef.current) {
-      firebaseSyncRef.current = true;
-      try { set(ref(db, "crypto-scanner/trades"), trades); } catch (e) { firebaseSyncRef.current = false; }
-    }
-  }, [trades]);
 
   const toggleWatch = (symbol) => {
     setWatchlist(prev => {
@@ -1421,8 +1224,6 @@ export default function App() {
     const last = parseFloat(c[c.length - 1][4]);
     return prev > 0 ? ((last - prev) / prev) * 100 : 0;
   }, [btcData]);
-  const btcCrashing = btcChange1h < -2;
-  const hasActiveTrades = Object.values(trades).some(t => t?.isActive);
 
   const altResults = useMemo(() => {
     // First pass: score all tokens
@@ -1475,9 +1276,8 @@ export default function App() {
   const displayed = useMemo(() => {
     let list = sorted;
     if (viewFilter === "watched") list = sorted.filter(t => watchlist.has(t.symbol));
-    if (viewFilter === "active") list = sorted.filter(t => trades[t.symbol]?.isActive);
     return list;
-  }, [sorted, viewFilter, watchlist, trades]);
+  }, [sorted, viewFilter, watchlist]);
 
   const searched = useMemo(() => {
     if (!searchQuery.trim()) return displayed;
@@ -1488,21 +1288,6 @@ export default function App() {
       (t.narrative || []).some(n => n.toLowerCase().includes(q))
     );
   }, [displayed, searchQuery]);
-
-  // Daily PNL: sum unrealized PNL across all active trades (must be after altResults)
-  const dailyPnl = useMemo(() => {
-    let total = 0, invested = 0;
-    altResults.forEach(t => {
-      const trade = trades[t.symbol];
-      if (trade?.isActive && t.analysis) {
-        const tokens_ = trade.totalCapital / trade.avgEntryPrice;
-        const cur = tokens_ * t.analysis.currentPrice;
-        total += cur - trade.totalCapital;
-        invested += trade.totalCapital;
-      }
-    });
-    return { pnl: total, invested };
-  }, [altResults, trades]);
 
   const shortlist = sorted.filter(t => t.analysis && t.analysis.score >= 40 && t.analysis.btcSafe);
 
@@ -1603,49 +1388,6 @@ export default function App() {
 
         {/* ── External Factors Panel ── */}
         <ExternalFactorsPanel />
-
-        {/* ── BTC 1H Crash Alert ── */}
-        {btcCrashing && hasActiveTrades && (
-          <div className="card" style={{
-            background: "rgba(127,29,29,0.4)", border: "1px solid #ef444470",
-            borderRadius: 12, padding: "10px 14px", marginBottom: 10,
-            display: "flex", alignItems: "center", gap: 10,
-          }}>
-            <span style={{ fontSize: 18 }}>⚡</span>
-            <div>
-              <div style={{ fontSize: 11, fontWeight: 800, color: "#f87171", letterSpacing: 1 }}>
-                BTC DROPPED {Math.abs(btcChange1h).toFixed(2)}% IN 1H — ACTIVE TRADES AT RISK
-              </div>
-              <div style={{ fontSize: 10, color: "#fca5a5", marginTop: 2 }}>
-                Playbook: altcoins follow BTC down harder. Consider early exit.
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ── Daily PNL Strip ── */}
-        {dailyPnl.invested > 0 && (
-          <div className="card" style={{
-            background: "#12121e", border: "1px solid #1e1e2e",
-            borderRadius: 12, padding: "10px 14px", marginBottom: 10,
-            display: "flex", justifyContent: "space-between", alignItems: "center",
-          }}>
-            <span style={{ fontSize: 10, fontWeight: 700, color: "#6b7280", letterSpacing: 1 }}>OPEN POSITIONS</span>
-            <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
-              <div>
-                <span style={{ fontSize: 9, color: "#6b7280" }}>INVESTED </span>
-                <span style={{ fontSize: 12, fontFamily: "var(--mono)", fontWeight: 700 }}>${dailyPnl.invested.toFixed(0)}</span>
-              </div>
-              <div>
-                <span style={{ fontSize: 9, color: "#6b7280" }}>UNREALIZED PNL </span>
-                <span style={{ fontSize: 13, fontFamily: "var(--mono)", fontWeight: 800, color: dailyPnl.pnl >= 0 ? "#4ade80" : "#f87171" }}>
-                  {dailyPnl.pnl >= 0 ? "+" : ""}{dailyPnl.pnl.toFixed(2)}
-                  {dailyPnl.invested > 0 && ` (${((dailyPnl.pnl / dailyPnl.invested) * 100).toFixed(2)}%)`}
-                </span>
-              </div>
-            </div>
-          </div>
-        )}
 
         {/* ── BTC Status ── */}
         {btcAnalysis && (
@@ -1810,9 +1552,9 @@ export default function App() {
         <div style={{ display: "flex", gap: 6, marginBottom: 14, overflowX: "auto", paddingBottom: 2, alignItems: "center" }}>
           {/* Main Filter Toggle */}
           <div style={{ display: "flex", borderRadius: 6, overflow: "hidden", flexShrink: 0, border: "1px solid #1e1e2e" }}>
-            {[["all", "ALL"], ["watched", `★ ${watchlist.size}`], ["active", "💼 ACTIVE"]].map(([val, label]) => (
+            {[["all", "ALL"], ["watched", `★ ${watchlist.size}`]].map(([val, label]) => (
               <button key={val} onClick={() => setViewFilter(val)} style={{
-                background: viewFilter === val ? (val === "watched" ? "#854d0e" : val === "active" ? "#1e3a8a" : "#818cf8") : "#12121e",
+                background: viewFilter === val ? (val === "watched" ? "#854d0e" : "#818cf8") : "#12121e",
                 color: viewFilter === val ? "#fff" : "#6b7280",
                 border: "none", padding: "5px 10px", fontSize: 11, fontWeight: 700,
                 cursor: "pointer", whiteSpace: "nowrap",
@@ -1851,13 +1593,6 @@ export default function App() {
             <div style={{ fontSize: 13, fontWeight: 700, color: "#94a3b8" }}>No watched tokens</div>
           </div>
         )}
-        {!loading && viewFilter === "active" && displayed.length === 0 && (
-          <div className="card" style={{ background: "#12121e", border: "1px solid #1e1e2e", borderRadius: 12, padding: 14, marginBottom: 10, textAlign: "center" }}>
-            <div style={{ fontSize: 24, marginBottom: 6 }}>💼</div>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#94a3b8" }}>No active trades</div>
-            <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>Expand a token card to log a trade.</div>
-          </div>
-        )}
         {!loading && searchQuery && searched.length === 0 && (
           <div className="card" style={{ background: "#12121e", border: "1px solid #1e1e2e", borderRadius: 12, padding: 14, marginBottom: 10, textAlign: "center" }}>
             <div style={{ fontSize: 13, fontWeight: 700, color: "#94a3b8" }}>No tokens match "{searchQuery}"</div>
@@ -1871,22 +1606,14 @@ export default function App() {
           const isGood = analysis.score >= 40 && analysis.btcSafe;
           const hasSetup = analysis.entry;
           const isSelected = selected.has(symbol);
-          const trade = trades[symbol];
-          const bc = selectMode && isSelected ? "#818cf8" : trade?.isActive ? "#3b82f680" : hasSetup ? "#22c55e50" : isGood ? "#818cf850" : "#1e1e2e";
-
-          // Calculate PNL for unexpanded badge
-          let currentPnlPct = 0;
-          if (trade?.isActive) {
-            const currentVal = (trade.totalCapital / trade.avgEntryPrice) * analysis.currentPrice;
-            currentPnlPct = ((currentVal - trade.totalCapital) / trade.totalCapital) * 100;
-          }
+          const bc = selectMode && isSelected ? "#818cf8" : hasSetup ? "#22c55e50" : isGood ? "#818cf850" : "#1e1e2e";
 
           return (
             <div key={symbol} className="card" style={{ animationDelay: `${idx * 0.04}s`, marginBottom: 8 }}>
               <div
                 onClick={() => selectMode ? toggleSelect(symbol) : setExpanded(isExpanded ? null : symbol)}
                 style={{
-                  background: trade?.isActive ? "linear-gradient(to bottom right, #1a2035, #12121e)" : "#12121e", 
+                  background: "#12121e",
                   border: `1px solid ${bc}`, borderRadius: 12,
                   cursor: "pointer", overflow: "hidden", transition: "border-color 0.3s",
                 }}
@@ -1908,13 +1635,7 @@ export default function App() {
                         <span style={{ fontSize: 15, fontWeight: 800 }}>{name}</span>
                         <span style={{ fontSize: 10, color: "#6b7280", fontFamily: "var(--mono)" }}>{symbol.replace("USDT", "")}</span>
                         
-                        {trade?.isActive && (
-                           <span style={{ background: currentPnlPct >= 0 ? "#14532d" : "#7f1d1d", color: currentPnlPct >= 0 ? "#4ade80" : "#f87171", padding: "2px 6px", borderRadius: 4, fontSize: 10, fontWeight: 800, fontFamily: "var(--mono)", letterSpacing: 0.5 }}>
-                             {currentPnlPct >= 0 ? "+" : ""}{currentPnlPct.toFixed(2)}%
-                           </span>
-                        )}
-
-                        {!trade?.isActive && hasSetup && (
+                        {hasSetup && (
                           <span style={{ background: "#166534", color: "#4ade80", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 800, letterSpacing: 1 }}>SETUP</span>
                         )}
                       </div>
@@ -2001,15 +1722,6 @@ export default function App() {
                 {isExpanded && (
                   <div style={{ borderTop: "1px solid #1a1a2e", padding: 14, background: "#0d0d18" }}>
                     
-                    {/* Trade Manager Component */}
-                    <TradeManager
-                      symbol={symbol}
-                      currentPrice={analysis.currentPrice}
-                      riskPct={analysis.riskPct}
-                      rsi1h={analysis.rsi1h}
-                      trades={trades}
-                      setTrades={setTrades}
-                    />
 
                     {/* S/R Levels & Analysis Details (Truncated for clean look, matching previous layout) */}
                     <div style={{ marginTop: 14 }}>
