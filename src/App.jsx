@@ -123,8 +123,8 @@ function calcBollingerBands(closes, period = 20, mult = 2) {
   return { upper, lower, sma, bandwidth, percentB, squeeze: bandwidth < avgBandwidth * 0.75 };
 }
 
-function detectCandlePattern(candles) {
-  if (candles.length < 3) return { pattern: "N/A", bullish: false };
+function detectCandlePattern(candles, atr = null) {
+  if (candles.length < 3) return { pattern: "N/A", bullish: false, confirmationStrength: "NONE", proportional: false };
   const last = candles[candles.length - 1];
   const prev = candles[candles.length - 2];
   const ante = candles[candles.length - 3];
@@ -137,15 +137,31 @@ function detectCandlePattern(candles) {
   const anteBody = Math.abs(ac - ao);
   const prevBody = Math.abs(pc - po);
 
-  if (c > o && body > Math.abs(pc - po) && c > po && o < pc) return { pattern: "Bullish Engulfing", bullish: true, confirmationStrength: "HIGH" };
-  if (c > o && lowerWick > body * 2 && upperWick < body * 0.3) return { pattern: "Hammer", bullish: true, confirmationStrength: "HIGH" };
+  // ── PROPORTIONALITY CHECK ──
+  // Reversal candle body must be >= 1.5x ATR to count as HIGH strength
+  // Also check thrust reclaim: if last 3 candles dropped >5%, reversal must reclaim >=30%
+  const isProportional = (bodySize) => {
+    if (!atr || atr <= 0) return true; // no ATR data → can't validate, assume true
+    return bodySize >= atr * 1.5;
+  };
+
+  const thrustDrop = ao > 0 ? ((ao - Math.min(c, pc, ac)) / ao) * 100 : 0;
+  const thrustReclaim = thrustDrop > 0 ? ((c - Math.min(l, parseFloat(prev[3]))) / (ao - Math.min(l, parseFloat(prev[3])))) * 100 : 100;
+  const passesThrust = thrustDrop < 5 || thrustReclaim >= 30;
+
+  const proportional = isProportional(body) && passesThrust;
+
+  if (c > o && body > Math.abs(pc - po) && c > po && o < pc)
+    return { pattern: "Bullish Engulfing", bullish: true, confirmationStrength: proportional ? "HIGH" : "LOW", proportional };
+  if (c > o && lowerWick > body * 2 && upperWick < body * 0.3)
+    return { pattern: "Hammer", bullish: true, confirmationStrength: proportional ? "HIGH" : "LOW", proportional };
   // Morning Star: bearish large candle → small doji → bullish candle closing above ante midpoint
   if (ac < ao && anteBody > 0 && prevBody < anteBody * 0.35 && c > o && c > (ao + ac) / 2)
-    return { pattern: "Morning Star", bullish: true, confirmationStrength: "HIGH" };
-  if (c < o && upperWick > body * 2 && lowerWick < body * 0.3) return { pattern: "Shooting Star", bullish: false, confirmationStrength: "HIGH" };
-  if (c < o && body > Math.abs(pc - po) && c < po && o > pc) return { pattern: "Bearish Engulfing", bullish: false, confirmationStrength: "HIGH" };
-  if (c > o) return { pattern: "Green Candle", bullish: true, confirmationStrength: "LOW" };
-  return { pattern: "Red Candle", bullish: false, confirmationStrength: "NONE" };
+    return { pattern: "Morning Star", bullish: true, confirmationStrength: proportional ? "HIGH" : "LOW", proportional };
+  if (c < o && upperWick > body * 2 && lowerWick < body * 0.3) return { pattern: "Shooting Star", bullish: false, confirmationStrength: "HIGH", proportional };
+  if (c < o && body > Math.abs(pc - po) && c < po && o > pc) return { pattern: "Bearish Engulfing", bullish: false, confirmationStrength: "HIGH", proportional };
+  if (c > o) return { pattern: "Green Candle", bullish: true, confirmationStrength: "LOW", proportional: false };
+  return { pattern: "Red Candle", bullish: false, confirmationStrength: "NONE", proportional: false };
 }
 
 function findSupportResistance(candles, count = 3) {
@@ -153,21 +169,61 @@ function findSupportResistance(candles, count = 3) {
   const lows = candles.map(c => parseFloat(c[3]));
   const closes = candles.map(c => parseFloat(c[4]));
   const currentPrice = closes[closes.length - 1];
-  let supports = [], resistances = [];
+
+  // Collect raw pivot levels with their candle index (for age tracking)
+  let rawSupports = [], rawResistances = [];
   for (let i = 2; i < candles.length - 2; i++) {
     if (lows[i] <= lows[i - 1] && lows[i] <= lows[i - 2] && lows[i] <= lows[i + 1] && lows[i] <= lows[i + 2]) {
-      if (lows[i] < currentPrice) supports.push(lows[i]);
+      if (lows[i] < currentPrice) rawSupports.push({ level: lows[i], index: i });
     }
     if (highs[i] >= highs[i - 1] && highs[i] >= highs[i - 2] && highs[i] >= highs[i + 1] && highs[i] >= highs[i + 2]) {
-      if (highs[i] > currentPrice) resistances.push(highs[i]);
+      if (highs[i] > currentPrice) rawResistances.push({ level: highs[i], index: i });
     }
   }
-  supports.sort((a, b) => b - a);
-  resistances.sort((a, b) => a - b);
+
+  // Cluster nearby levels (within 0.5% of each other) and count touches
+  const clusterLevels = (rawLevels) => {
+    const clusters = [];
+    const used = new Set();
+    rawLevels.forEach((item, idx) => {
+      if (used.has(idx)) return;
+      const cluster = [item];
+      used.add(idx);
+      rawLevels.forEach((other, jdx) => {
+        if (used.has(jdx)) return;
+        if (Math.abs(item.level - other.level) / item.level < 0.005) {
+          cluster.push(other);
+          used.add(jdx);
+        }
+      });
+      const avgLevel = cluster.reduce((a, c) => a + c.level, 0) / cluster.length;
+      const oldestIndex = Math.min(...cluster.map(c => c.index));
+      const age = candles.length - 1 - oldestIndex; // candles since first touch
+      clusters.push({ level: avgLevel, touches: cluster.length, age });
+    });
+    return clusters;
+  };
+
+  const supportClusters = clusterLevels(rawSupports).sort((a, b) => b.level - a.level);
+  const resistanceClusters = clusterLevels(rawResistances).sort((a, b) => a.level - b.level);
+
+  const supports = supportClusters.slice(0, count).map(c => c.level);
+  const resistances = resistanceClusters.slice(0, count).map(c => c.level);
+
+  // Nearest support quality assessment
+  const nearestSupportCluster = supportClusters[0] || null;
+  const nearSupport = supports.length > 0 && ((currentPrice - supports[0]) / currentPrice) < 0.02;
+
+  // Support is "validated" if it has 2+ touches and is at least 10 candles old
+  const supportValidated = nearestSupportCluster
+    ? nearestSupportCluster.touches >= 2 && nearestSupportCluster.age >= 10
+    : false;
+
   return {
-    supports: supports.slice(0, count),
-    resistances: resistances.slice(0, count),
-    nearSupport: supports.length > 0 && ((currentPrice - supports[0]) / currentPrice) < 0.02,
+    supports, resistances, nearSupport, supportValidated,
+    nearestSupportDetail: nearestSupportCluster,
+    supportClusters: supportClusters.slice(0, count),
+    resistanceClusters: resistanceClusters.slice(0, count),
   };
 }
 
@@ -337,6 +393,7 @@ function detectAsianRange(candles1h) {
 
 // Detect stop hunt / liquidity sweep patterns in the last 5 candles
 // A sweep = wick penetrates a key level but the candle BODY closes back past it → stops grabbed, reversal likely
+// Enhanced: verify that the reclaim is meaningful (close sufficiently above/below swept level)
 function detectLiquiditySweep(candles, supports, resistances, asianRange) {
   if (!candles || candles.length < 5) return { detected: false, type: "none" };
   const results = [];
@@ -350,21 +407,40 @@ function detectLiquiditySweep(candles, supports, resistances, asianRange) {
     // Bullish: wick pierces support but body closes back above it
     if (supports.length > 0) {
       const s = supports[0];
-      if (l < s && c > s && lowerWick > body * 1.5)
-        results.push({ type: "bullish_sweep", label: "Stop Hunt Below Support", level: s, bullish: true });
+      if (l < s && c > s && lowerWick > body * 1.5) {
+        // Reclaim strength: how far above the swept level did the candle close?
+        const reclaimPct = s > 0 ? ((c - s) / s) * 100 : 0;
+        const reclaimed = reclaimPct > 0.3; // must close >0.3% above swept level
+        results.push({
+          type: "bullish_sweep",
+          label: reclaimed ? "Stop Hunt Below Support (reclaimed)" : "Stop Hunt Below Support (weak reclaim)",
+          level: s, bullish: true, reclaimed, reclaimPct,
+        });
+      }
     }
     // Bearish: wick pierces resistance but body closes back below it
     if (resistances.length > 0) {
       const r = resistances[0];
-      if (h > r && c < r && upperWick > body * 1.5)
-        results.push({ type: "bearish_sweep", label: "Stop Hunt Above Resistance", level: r, bullish: false });
+      if (h > r && c < r && upperWick > body * 1.5) {
+        const reclaimPct = r > 0 ? ((r - c) / r) * 100 : 0;
+        const reclaimed = reclaimPct > 0.3;
+        results.push({
+          type: "bearish_sweep",
+          label: reclaimed ? "Stop Hunt Above Resistance (reclaimed)" : "Stop Hunt Above Resistance (weak reclaim)",
+          level: r, bullish: false, reclaimed, reclaimPct,
+        });
+      }
     }
     // Asian range sweeps — classic session-open manipulation
     if (asianRange) {
-      if (l < asianRange.low  && c > asianRange.low  && lowerWick > body)
-        results.push({ type: "asian_low_sweep",  label: "Asian Low Swept — Bullish Reversal",  level: asianRange.low,  bullish: true });
-      if (h > asianRange.high && c < asianRange.high && upperWick > body)
-        results.push({ type: "asian_high_sweep", label: "Asian High Swept — Bearish Reversal", level: asianRange.high, bullish: false });
+      if (l < asianRange.low  && c > asianRange.low  && lowerWick > body) {
+        const reclaimPct = asianRange.low > 0 ? ((c - asianRange.low) / asianRange.low) * 100 : 0;
+        results.push({ type: "asian_low_sweep",  label: "Asian Low Swept — Bullish Reversal",  level: asianRange.low,  bullish: true, reclaimed: reclaimPct > 0.3, reclaimPct });
+      }
+      if (h > asianRange.high && c < asianRange.high && upperWick > body) {
+        const reclaimPct = asianRange.high > 0 ? ((asianRange.high - c) / asianRange.high) * 100 : 0;
+        results.push({ type: "asian_high_sweep", label: "Asian High Swept — Bearish Reversal", level: asianRange.high, bullish: false, reclaimed: reclaimPct > 0.3, reclaimPct });
+      }
     }
   });
   if (!results.length) return { detected: false, type: "none" };
@@ -397,8 +473,11 @@ function scoreToken(data, btcData) {
   // Playbook: volume on the signal candle itself must exceed 20MA
   const signalCandleVolOk = avgVol20 > 0 && volumes1h[volumes1h.length - 1] > avgVol20;
 
-  const { pattern, bullish, confirmationStrength } = detectCandlePattern(candles1h);
-  const { supports, resistances, nearSupport } = findSupportResistance(candles1h);
+  // ATR needed early for proportional candle validation
+  const atr = calcATR(candles1h);
+
+  const { pattern, bullish, confirmationStrength, proportional } = detectCandlePattern(candles1h, atr);
+  const { supports, resistances, nearSupport, supportValidated, nearestSupportDetail } = findSupportResistance(candles1h);
   const fvg = detectFVG(candles1h);
 
   // Session + liquidity sweep
@@ -409,9 +488,8 @@ function scoreToken(data, btcData) {
   // Session-adjusted volume
   const sessionVolume = getSessionAdjustedVolume(volRatio, sessionInfo.session);
 
-  // New indicators
+  // New indicators (ATR already calculated above for candle proportionality)
   const macd = calcMACD(closes1h);
-  const atr = calcATR(candles1h);
   const bb = calcBollingerBands(closes1h);
   const ema20arr = calcEMA(closes1h, 20);
   const ema50arr = calcEMA(closes1h, 50);
@@ -435,11 +513,61 @@ function scoreToken(data, btcData) {
   const nearResistance = resistances.length > 0 && ((resistances[0] - currentPrice) / currentPrice) < 0.02;
   const volContext = isVolumeClimax ? (nearSupport ? "accumulation" : nearResistance ? "distribution" : "spike") : "normal";
 
+  // ── VOLUME POLARITY ──
+  // Check if recent high-volume candles are bearish (distribution) or bullish (accumulation)
+  // Look at last 5 candles: count whether volume-above-average candles are red or green
+  const recentCandles = candles1h.slice(-5);
+  let sellVolumeCandles = 0, buyVolumeCandles = 0;
+  recentCandles.forEach(c => {
+    const cOpen = parseFloat(c[1]), cClose = parseFloat(c[4]), cVol = parseFloat(c[5]);
+    if (cVol > avgVol20) {
+      if (cClose < cOpen) sellVolumeCandles++;
+      else buyVolumeCandles++;
+    }
+  });
+  // Signal candle polarity: is the latest candle's volume on a green or red candle?
+  const signalCandleColor = parseFloat(candles1h[candles1h.length - 1][4]) >= parseFloat(candles1h[candles1h.length - 1][1]) ? "green" : "red";
+  const volumePolarity = sellVolumeCandles > buyVolumeCandles ? "distribution" : buyVolumeCandles > sellVolumeCandles ? "accumulation" : "neutral";
+  // If volume is high but dominated by sell candles, it's distribution not buying interest
+  const volumePolarityBearish = volumePolarity === "distribution" && signalCandleColor === "red";
+
   const btcCloses = btcData?.candles4h?.map(c => parseFloat(c[4])) || [];
   const btcLast = btcCloses[btcCloses.length - 1] || 0;
   const btcPrev4h = btcCloses[btcCloses.length - 2] || btcLast;
   const btcChange4h = btcPrev4h > 0 ? ((btcLast - btcPrev4h) / btcPrev4h) * 100 : 0;
-  const btcSafe = btcChange4h > -3;
+
+  // ── ENHANCED BTC REGIME FILTER ──
+  // Rolling 12H high-to-low dump detection (3 × 4H candles)
+  const btcHighs4h = btcData?.candles4h?.slice(-3).map(c => parseFloat(c[2])) || [];
+  const btcLows4h = btcData?.candles4h?.slice(-3).map(c => parseFloat(c[3])) || [];
+  const btcRolling12hHigh = btcHighs4h.length ? Math.max(...btcHighs4h) : btcLast;
+  const btcRolling12hLow = btcLows4h.length ? Math.min(...btcLows4h) : btcLast;
+  const btcRolling12hDump = btcRolling12hHigh > 0
+    ? ((btcRolling12hHigh - btcRolling12hLow) / btcRolling12hHigh) * 100 : 0;
+
+  // BTC EMA distance: check if price broke below all key EMAs recently
+  const btcCloses1hForEMA = btcData?.candles1h?.map(c => parseFloat(c[4])) || [];
+  const btcEMA20arr = calcEMA(btcCloses1hForEMA, 20);
+  const btcEMA50arr = calcEMA(btcCloses1hForEMA, 50);
+  const btcEMA200arr = calcEMA(btcCloses1hForEMA, Math.min(200, btcCloses1hForEMA.length - 1 || 1));
+  const btcCurrentEMA20 = btcEMA20arr[btcEMA20arr.length - 1] || btcLast;
+  const btcCurrentEMA50 = btcEMA50arr[btcEMA50arr.length - 1] || btcLast;
+  const btcCurrentEMA200 = btcEMA200arr[btcEMA200arr.length - 1] || btcLast;
+  const btcBelowAllEMAs = btcLast < btcCurrentEMA20 && btcLast < btcCurrentEMA50 && btcLast < btcCurrentEMA200;
+
+  // BTC regime verdict:
+  // - btcSafe = false if current 4H candle dumps >3% (original)
+  // - btcSafe = false if rolling 12H drop exceeds 4%
+  // - btcCaution = true if price is below all 3 EMAs (trade with reduced confidence)
+  const btcSafe = btcChange4h > -3 && btcRolling12hDump < 4;
+  const btcCaution = btcBelowAllEMAs;
+  const btcRegime = {
+    change4h: btcChange4h,
+    rolling12hDump: btcRolling12hDump,
+    belowAllEMAs: btcBelowAllEMAs,
+    caution: btcCaution,
+    safe: btcSafe,
+  };
 
   const idx24hAgo = Math.max(0, closes1h.length - 25);
   const change24h = closes1h[idx24hAgo] > 0 ? ((currentPrice - closes1h[idx24hAgo]) / closes1h[idx24hAgo]) * 100 : 0;
@@ -447,7 +575,7 @@ function scoreToken(data, btcData) {
   // ── HARD REJECTION GATES ──
   // These prevent tokens from even being scored if they fundamentally fail
   let hardReject = null;
-  if (!btcSafe)                        hardReject = "BTC dumping >3% on 4H";
+  if (!btcSafe)                          hardReject = `BTC dumping (4H: ${btcChange4h.toFixed(1)}%, 12H drop: ${btcRolling12hDump.toFixed(1)}%)`;
   else if (rsi1h !== null && rsi1h > 70) hardReject = "RSI overbought (>70)";
   else if (sessionVolume.grade === "DEAD" && !isVolumeClimax)
                                          hardReject = `Dead volume (${sessionVolume.adjusted.toFixed(2)}x session-adjusted)`;
@@ -455,18 +583,29 @@ function scoreToken(data, btcData) {
   let score = 0;
   let reasons = [];
   let setupType = "None";
+  let catchingKnifeRisk = false;
+  let asianRangeBreakdown = false;
 
   if (hardReject) {
     reasons.push(`⛔ REJECTED: ${hardReject}`);
     score = -50;
   } else {
+    // ── BTC below all EMAs caution — penalize even when technically "safe" ──
+    if (btcCaution) {
+      score -= 15;
+      reasons.push("⚠ BTC below all key EMAs (20/50/200) — macro weakness");
+    }
     // ── RSI 1H scoring (weighted per playbook) ──
     if (rsi1h !== null) {
       if (rsi1h >= 30 && rsi1h <= 40)      { score += 25; reasons.push(`RSI 1H in primary zone (${rsi1h.toFixed(1)})`); }
       else if (rsi1h > 40 && rsi1h <= 50)   { score += 10; reasons.push(`RSI 1H neutral (${rsi1h.toFixed(1)})`); }
-      else if (rsi1h < 30)                   { score += 15; reasons.push(`RSI 1H deeply oversold (${rsi1h.toFixed(1)})`); }
+      else if (rsi1h < 30)                   {
+        score += 5; // Reduced from +15 — deeply oversold = knife catching risk
+        reasons.push(`RSI 1H deeply oversold (${rsi1h.toFixed(1)}) — catching knife risk, requires double bottom or AI visual confirmation`);
+      }
       else if (rsi1h > 60)                   { score -= 10; reasons.push(`RSI 1H warm (${rsi1h.toFixed(1)})`); }
     }
+    catchingKnifeRisk = rsi1h !== null && rsi1h < 30;
 
     // ── Multi-TF RSI alignment ──
     if (rsi1h !== null && rsi4h !== null) {
@@ -476,7 +615,13 @@ function scoreToken(data, btcData) {
     }
 
     // ── Structure + EMA ──
-    if (nearSupport)                           { score += 15; reasons.push("Price near key support level"); }
+    if (nearSupport) {
+      if (supportValidated) {
+        score += 15; reasons.push(`Price near validated support (${nearestSupportDetail.touches} touches, ${nearestSupportDetail.age} candles old)`);
+      } else {
+        score += 5; reasons.push(`Price near fresh support (${nearestSupportDetail ? nearestSupportDetail.touches + " touch, " + nearestSupportDetail.age + " candles old" : "unvalidated"} — AI visual confirmation recommended)`);
+      }
+    }
     if (priceVsEMA > -2 && priceVsEMA < 2)    { score += 10; reasons.push(`Near 200 EMA (${priceVsEMA > 0 ? "+" : ""}${priceVsEMA.toFixed(1)}%)`); }
 
     // ── Volume scoring (SESSION-ADJUSTED) ──
@@ -488,22 +633,48 @@ function scoreToken(data, btcData) {
     if (isVolumeClimax && nearSupport)       { score += 10; reasons.push("Volume climax at support — accumulation"); }
     else if (isVolumeClimax && nearResistance) { score -= 5; reasons.push("Volume climax at resistance — distribution risk"); }
 
-    // ── Candle patterns (with confirmation strength) ──
+    // Volume polarity: high volume on red candles = selling pressure, not buying
+    if (volumePolarityBearish) {
+      score -= 10;
+      reasons.push(`⚠ Volume polarity bearish — ${sellVolumeCandles}/${recentCandles.length} high-vol candles are red (distribution, not accumulation)`);
+    } else if (volumePolarity === "accumulation" && signalCandleColor === "green") {
+      score += 5;
+      reasons.push(`Volume polarity bullish — ${buyVolumeCandles}/${recentCandles.length} high-vol candles are green`);
+    }
+
+    // ── Candle patterns (with confirmation strength + proportionality) ──
     if (confirmationStrength === "HIGH" && nearSupport) { score += 15; reasons.push(`✓ ${pattern} at support (confirmed)`); }
     else if (confirmationStrength === "HIGH")          { score += 10; reasons.push(`${pattern} (confirmed)`); }
     else if (bullish && nearSupport)                    { score += 5;  reasons.push(`${pattern} at support (weak — no confirmation)`); }
     else if (bullish)                                   { score += 2;  reasons.push(`${pattern} (weak — needs confirmation candle)`); }
+
+    // Disproportionate candle penalty: pattern detected but candle body too small relative to ATR/thrust
+    if (!proportional && bullish && (pattern === "Bullish Engulfing" || pattern === "Morning Star" || pattern === "Hammer")) {
+      score -= 10;
+      reasons.push(`⚠ ${pattern} disproportionate — body too small vs ATR or failed thrust reclaim (AI visual confirmation required)`);
+    }
 
     if (fvg.found && fvg.inZone && rsi1h < 50) {
       score += 20;
       reasons.push(fvg.hasRejection ? "Price in FVG reclaim zone + rejection candle confirmed" : "Price in FVG reclaim zone (awaiting rejection candle)");
     }
 
-    // ── MACD ──
+    // ── MACD (with zone classification) ──
     if (macd) {
-      if (macd.bullishCross)                        { score += 15; reasons.push("MACD bullish crossover"); }
-      else if (macd.rising && macd.histogram < 0)   { score += 5;  reasons.push("MACD momentum improving"); }
-      if (macd.bearishCross)                         { score -= 10; reasons.push("MACD bearish crossover"); }
+      // Classify MACD zone for accurate interpretation
+      const macdZone = macd.bullishCross ? "bullish_crossover"
+        : macd.histogram > 0 && macd.rising ? "bullish_acceleration"
+        : macd.histogram < 0 && macd.rising ? "bearish_deceleration"
+        : macd.bearishCross ? "bearish_crossover"
+        : macd.histogram < 0 && !macd.rising ? "bearish_acceleration"
+        : "neutral";
+      macd.zone = macdZone;
+
+      if (macd.bullishCross)                         { score += 15; reasons.push("MACD bullish crossover"); }
+      else if (macdZone === "bearish_deceleration")   { score += 0;  reasons.push("MACD bearish deceleration (neutral — not a buy signal)"); }
+      else if (macdZone === "bullish_acceleration")   { score += 8;  reasons.push("MACD bullish acceleration"); }
+      if (macd.bearishCross)                          { score -= 10; reasons.push("MACD bearish crossover"); }
+      else if (macdZone === "bearish_acceleration")   { score -= 5;  reasons.push("MACD bearish momentum accelerating"); }
     }
 
     // ── Trend direction ──
@@ -512,9 +683,18 @@ function scoreToken(data, btcData) {
       else if (!inUptrend && rsi1h < 40) { score -= 10; reasons.push("Dip in downtrend — catching knife risk"); }
     }
 
-    // ── Bollinger Bands ──
+    // ── Bollinger Bands (trend-context-aware) ──
     if (bb) {
-      if (bb.percentB < 0.15 && rsi1h < 40)   { score += 15; reasons.push("Price at lower Bollinger Band + RSI oversold"); }
+      if (bb.percentB < 0.15 && rsi1h < 40) {
+        if (inUptrend || trendStrength > -0.5) {
+          // Sideways or uptrend: low %B is mean reversion opportunity
+          score += 15; reasons.push("Price at lower Bollinger Band + RSI oversold (mean reversion)");
+        } else {
+          // Downtrend: low %B is "walking the band" — bearish continuation
+          score -= 5; reasons.push("⚠ Walking lower Bollinger Band in downtrend — continuation signal, not reversal");
+          bb.walkingBand = true;
+        }
+      }
       else if (bb.percentB < 0.2)              { score += 5;  reasons.push("Near lower Bollinger Band"); }
       if (bb.squeeze)                           { score += 5;  reasons.push("Bollinger squeeze — breakout imminent"); }
       if (bb.percentB > 0.95 && rsi1h > 65)    { score -= 10; reasons.push("At upper BB + RSI high — overextended"); }
@@ -524,12 +704,20 @@ function scoreToken(data, btcData) {
     if (momentumImproving && rsi1h < 55) { score += 10; reasons.push(`Momentum improving (ROC: ${roc.toFixed(1)}%)`); }
     else if (roc < -8)                    { score -= 5;  reasons.push(`Momentum deteriorating (ROC: ${roc.toFixed(1)}%)`); }
 
-    // ── Liquidity sweep ──
+    // ── Liquidity sweep (with reclaim verification) ──
     if (liquiditySweep.detected && liquiditySweep.bullish) {
-      score += 15; reasons.push(`Liquidity sweep: ${liquiditySweep.label}`);
+      if (liquiditySweep.reclaimed) {
+        score += 15; reasons.push(`Liquidity sweep: ${liquiditySweep.label}`);
+      } else {
+        score -= 5; reasons.push(`⚠ Liquidity sweep without reclaim — ${liquiditySweep.label} (bearish continuation risk)`);
+      }
     }
     if (liquiditySweep.detected && !liquiditySweep.bullish) {
-      score -= 15; reasons.push(`Liquidity sweep: ${liquiditySweep.label}`);
+      if (liquiditySweep.reclaimed) {
+        score -= 15; reasons.push(`Liquidity sweep: ${liquiditySweep.label}`);
+      } else {
+        score += 5; reasons.push(`Bearish sweep failed to reclaim — may reverse`);
+      }
     }
 
     // ── Session risk ──
@@ -539,6 +727,36 @@ function scoreToken(data, btcData) {
     }
     if (asianRange?.isTight && sessionInfo.inAsian) {
       reasons.push(`Asian range tight (${asianRange.rangePct.toFixed(2)}%) — big move expected at session open`);
+    }
+
+    // ── Asian Range Breakdown ──
+    // If price has crashed through the entire Asian range, the "dip recovery at London open" thesis failed
+    asianRangeBreakdown = asianRange && currentPrice < asianRange.low;
+    const asianBreakdownSeverity = asianRange && atr
+      ? (asianRange.low - currentPrice) / atr : 0;
+    if (asianRangeBreakdown) {
+      if (asianBreakdownSeverity > 1) {
+        score -= 15;
+        reasons.push(`⚠ Asian range breakdown — price ${((asianRange.low - currentPrice) / asianRange.low * 100).toFixed(1)}% below Asian low (>1 ATR below)`);
+      } else {
+        score -= 5;
+        reasons.push(`Asian range breakdown — price below Asian low ($${asianRange.low.toFixed(4)})`);
+      }
+    }
+  }
+
+  // ── VOLATILITY REGIME ──
+  // Calculate average ATR over a longer window to detect elevated volatility
+  let volatilityRegime = "normal";
+  let atrRatio = 1.0;
+  if (atr && candles1h.length >= 50) {
+    // Calculate ATR for a window 20 candles ago as baseline
+    const olderCandles = candles1h.slice(0, -14);
+    const baselineATR = calcATR(olderCandles, 14);
+    if (baselineATR && baselineATR > 0) {
+      atrRatio = atr / baselineATR;
+      if (atrRatio > 2.0)      volatilityRegime = "extreme";
+      else if (atrRatio > 1.5) volatilityRegime = "elevated";
     }
   }
 
@@ -620,20 +838,45 @@ function scoreToken(data, btcData) {
     reasons.push(`⚠ Playbook R:R below 2:1 (${playbookBlendedRR.toFixed(2)}:1)`);
   }
 
+  // ── SIGNAL VOLUME HARD GATE ──
+  // Playbook rule: "Volume on the confirmation candle is above the 20-period volume average"
+  // If signal candle lacks volume, cap score and prevent CONFIRMED status
+  if (!signalCandleVolOk && setupType !== "None" && !hardReject) {
+    if (score > 50) score = 50;
+    reasons.push("⚠ Signal candle volume below 20MA — buying pressure unconfirmed (hard gate)");
+    if (setupStatus === "CONFIRMED") setupStatus = "FORMING";
+  }
+
+  // ── VOLATILITY REGIME PENALTY ──
+  if (volatilityRegime === "elevated" && !hardReject) {
+    score -= 5;
+    reasons.push(`⚠ Elevated volatility (ATR ${atrRatio.toFixed(1)}x baseline) — wider stops needed, ATR-based levels unreliable`);
+  } else if (volatilityRegime === "extreme" && !hardReject) {
+    score -= 15;
+    reasons.push(`⛔ Extreme volatility (ATR ${atrRatio.toFixed(1)}x baseline) — high stop-sweep probability, use playbook fixed stops only`);
+  }
+
+  // ── CATCHING KNIFE COMPOUND PENALTY ──
+  // If RSI < 30 AND downtrend AND support is unvalidated, this is a dangerous combination
+  if (catchingKnifeRisk && !inUptrend && !supportValidated && !hardReject) {
+    score -= 10;
+    reasons.push("⛔ Triple knife-catch: RSI <30 + downtrend + unvalidated support — wait for structure to form");
+  }
+
   // ── PLAYBOOK CHECKLIST (pre-filled for AI export) ──
   const btcCloses1h = btcData?.candles1h?.map(c => parseFloat(c[4])) || [];
   const btcRsi1h = calcRSI(btcCloses1h);
-  const dailyBiasLongs = btcSafe && btcChange4h > -1 && (btcRsi1h === null || btcRsi1h > 40);
+  const dailyBiasLongs = btcSafe && !btcCaution && btcChange4h > -1 && (btcRsi1h === null || btcRsi1h > 40);
   const hasActiveNarrative = (data.narrative || []).length > 0;
 
   const playbookChecklist = {
-    btcNotDumping:       { pass: btcSafe, value: `BTC ${btcChange4h >= 0 ? "+" : ""}${btcChange4h.toFixed(2)}% on 4H` },
-    dailyBiasLongs:      { pass: dailyBiasLongs, value: dailyBiasLongs ? "BTC stable/green" : "BTC bearish structure" },
+    btcNotDumping:       { pass: btcSafe, value: `BTC ${btcChange4h >= 0 ? "+" : ""}${btcChange4h.toFixed(2)}% on 4H, 12H drop: ${btcRolling12hDump.toFixed(1)}%` },
+    dailyBiasLongs:      { pass: dailyBiasLongs, value: dailyBiasLongs ? "BTC stable/green" : btcCaution ? "BTC below all EMAs" : "BTC bearish structure" },
     activeNarrative:     { pass: hasActiveNarrative, value: hasActiveNarrative ? (data.narrative || []).join(", ") : "None tagged" },
     volumeAboveAvg:      { pass: sessionVolume.adjusted >= 0.8, value: `${sessionVolume.grade} (${volRatio.toFixed(2)}x raw → ${sessionVolume.adjusted.toFixed(2)}x adjusted)` },
     noMajorEvents:       { pass: !sessionInfo.inDangerWindow, value: sessionInfo.inDangerWindow ? `${sessionInfo.nextSession} open in ${sessionInfo.minsToNext}min` : "No events detected" },
     rsiInZone:           { pass: rsi1h !== null && rsi1h >= 30 && rsi1h <= 40, value: rsi1h !== null ? `RSI ${rsi1h.toFixed(1)}` : "N/A" },
-    candleConfirmation:  { pass: confirmationStrength === "HIGH" && bullish, value: confirmationStrength === "HIGH" ? `${pattern} (confirmed)` : `${pattern} (${confirmationStrength.toLowerCase()})` },
+    candleConfirmation:  { pass: confirmationStrength === "HIGH" && bullish && proportional, value: confirmationStrength === "HIGH" && proportional ? `${pattern} (confirmed, proportional)` : confirmationStrength === "HIGH" ? `${pattern} (confirmed but disproportionate)` : `${pattern} (${confirmationStrength.toLowerCase()})` },
   };
   const checklistPassCount = Object.values(playbookChecklist).filter(c => c.pass).length;
   const checklistTotal = Object.keys(playbookChecklist).length;
@@ -646,21 +889,27 @@ function scoreToken(data, btcData) {
 
   return {
     rsi1h, rsi4h, currentPrice, ema200: currentEMA200, priceVsEMA,
-    volRatio, pattern, bullish, confirmationStrength, supports, resistances, nearSupport,
-    fvg, btcChange4h, btcSafe, change24h, score, reasons, setupType, setupStatus,
+    volRatio, pattern, bullish, confirmationStrength, proportional, supports, resistances, nearSupport, supportValidated,
+    fvg, btcChange4h, btcSafe, btcCaution, btcRegime, change24h, score, reasons, setupType, setupStatus,
     stopLoss, tp1, tp2, riskPct, rrRatio,
     playbookTP1, playbookTP2, playbookStop, playbookBlendedRR, signalCandleVolOk,
     entry: setupStatus === "CONFIRMED" || (setupStatus === "FORMING" && setupType !== "None"),
-    hardReject,
+    hardReject, catchingKnifeRisk,
     // Setup A details
     setupACriteria, setupAMet, setupATotal, setupAMissing,
     // Session-adjusted volume
     sessionVolume,
+    // Volume polarity
+    volumePolarity, volumePolarityBearish, sellVolumeCandles, buyVolumeCandles,
+    // Volatility regime
+    volatilityRegime, atrRatio,
+    // Support detail
+    nearestSupportDetail,
     // Playbook checklist
     playbookChecklist, checklistPassCount, checklistTotal, checklistFailures, checklistVerdict,
     macd, inUptrend, trendStrength, atr, bb, roc, momentumImproving,
     volSpike, volContext, isVolumeClimax,
-    sessionInfo, asianRange, liquiditySweep, sessionAdjustedStop,
+    sessionInfo, asianRange, asianRangeBreakdown, liquiditySweep, sessionAdjustedStop,
   };
 }
 
@@ -685,7 +934,10 @@ function buildExportPayload(symbol, name, narrative, analysis, btcAnalysis) {
     },
     btc: {
       safe: a.btcSafe,
+      caution: a.btcCaution || false,
       change4h: +a.btcChange4h.toFixed(2),
+      rolling12hDump: a.btcRegime ? +a.btcRegime.rolling12hDump.toFixed(2) : null,
+      belowAllEMAs: a.btcRegime?.belowAllEMAs || false,
       price: btcAnalysis?.currentPrice || null,
       rsi1h: btcAnalysis?.rsi1h ? +btcAnalysis.rsi1h.toFixed(1) : null,
     },
@@ -697,8 +949,10 @@ function buildExportPayload(symbol, name, narrative, analysis, btcAnalysis) {
     indicators: {
       rsi1h: a.rsi1h ? +a.rsi1h.toFixed(1) : null,
       rsi4h: a.rsi4h ? +a.rsi4h.toFixed(1) : null,
+      catchingKnifeRisk: a.catchingKnifeRisk || false,
       macd: a.macd ? {
         histogram: +a.macd.histogram.toFixed(6),
+        zone: a.macd.zone || null,
         bullishCross: a.macd.bullishCross,
         bearishCross: a.macd.bearishCross,
         rising: a.macd.rising,
@@ -707,8 +961,11 @@ function buildExportPayload(symbol, name, narrative, analysis, btcAnalysis) {
         percentB: +a.bb.percentB.toFixed(3),
         squeeze: a.bb.squeeze,
         bandwidth: +a.bb.bandwidth.toFixed(2),
+        walkingBand: a.bb.walkingBand || false,
       } : null,
       atr: a.atr ? +a.atr.toFixed(6) : null,
+      volatilityRegime: a.volatilityRegime || "normal",
+      atrRatio: a.atrRatio ? +a.atrRatio.toFixed(2) : null,
       roc: +a.roc.toFixed(2),
       momentumImproving: a.momentumImproving,
     },
@@ -724,12 +981,22 @@ function buildExportPayload(symbol, name, narrative, analysis, btcAnalysis) {
       spike: +a.volSpike.toFixed(2),
       climax: a.isVolumeClimax,
       context: a.volContext,
+      polarity: a.volumePolarity || "neutral",
+      polarityBearish: a.volumePolarityBearish || false,
+      sellCandles: a.sellVolumeCandles || 0,
+      buyCandles: a.buyVolumeCandles || 0,
     },
     structure: {
       pattern: a.pattern,
       confirmationStrength: a.confirmationStrength,
+      proportional: a.proportional || false,
       bullishCandle: a.bullish,
       nearSupport: a.nearSupport,
+      supportValidated: a.supportValidated || false,
+      supportDetail: a.nearestSupportDetail ? {
+        touches: a.nearestSupportDetail.touches,
+        age: a.nearestSupportDetail.age,
+      } : null,
       supports: a.supports.map(s => +s.toFixed(6)),
       resistances: a.resistances.map(r => +r.toFixed(6)),
       fvg: a.fvg.found ? { inZone: a.fvg.inZone, high: a.fvg.high, low: a.fvg.low } : null,
@@ -739,12 +1006,14 @@ function buildExportPayload(symbol, name, narrative, analysis, btcAnalysis) {
       low: a.asianRange.low,
       rangePct: +a.asianRange.rangePct.toFixed(2),
       tight: a.asianRange.isTight,
+      breakdown: a.asianRangeBreakdown || false,
     } : null,
     liquiditySweep: a.liquiditySweep?.detected ? {
       type: a.liquiditySweep.type,
       label: a.liquiditySweep.label,
       level: a.liquiditySweep.level,
       bullish: a.liquiditySweep.bullish,
+      reclaimed: a.liquiditySweep.reclaimed || false,
     } : null,
     setup: {
       type: a.setupType,
@@ -1177,11 +1446,21 @@ export default function App() {
   const copySelected = () => {
     const tokens = displayed.filter(t => selected.has(t.symbol) && t.analysis);
     if (!tokens.length) return;
+    const hasCorrelatedSelloff = tokens.some(t => t.analysis?.correlatedSelloff);
     const payload = {
       _instruction: "Analyze these token setups together. Compare which has the strongest setup and best R:R. Ask me for chart screenshots (1H + 4H) of the top picks before confirming entries.",
       scanTime: new Date().toISOString(),
       session: (() => { const s = getSessionInfo(); return { current: s.session, nextOpen: s.nextSession, minsToNext: s.minsToNext, dangerWindow: s.inDangerWindow, transitionRisk: s.sessionTransitionRisk }; })(),
-      btc: btcAnalysis ? { safe: btcAnalysis.btcSafe, change4h: +btcAnalysis.btcChange4h.toFixed(2), price: btcAnalysis.currentPrice, rsi1h: btcAnalysis.rsi1h ? +btcAnalysis.rsi1h.toFixed(1) : null } : null,
+      btc: btcAnalysis ? {
+        safe: btcAnalysis.btcSafe,
+        caution: btcAnalysis.btcCaution || false,
+        change4h: +btcAnalysis.btcChange4h.toFixed(2),
+        rolling12hDump: btcAnalysis.btcRegime ? +btcAnalysis.btcRegime.rolling12hDump.toFixed(2) : null,
+        belowAllEMAs: btcAnalysis.btcRegime?.belowAllEMAs || false,
+        price: btcAnalysis.currentPrice,
+        rsi1h: btcAnalysis.rsi1h ? +btcAnalysis.rsi1h.toFixed(1) : null,
+      } : null,
+      correlatedSelloff: hasCorrelatedSelloff,
       tokens: tokens.map(t => buildExportPayload(t.symbol, t.name, t.narrative, t.analysis, btcAnalysis)),
     };
     // Remove redundant btc/session/scanTime from individual tokens since they're at top level
@@ -1252,6 +1531,12 @@ export default function App() {
       return { ...t, analysis: scoreToken(d, btcData) };
     }).filter(t => t.analysis);
 
+    // ── CROSS-TOKEN CORRELATION DETECTION (Fix #9) ──
+    // If >75% of scanned tokens are down >3% in 24H, it's a macro-driven correlated selloff
+    const tokensWith24hData = initial.filter(t => t.analysis?.change24h !== undefined);
+    const tokensDown3Plus = tokensWith24hData.filter(t => t.analysis.change24h < -3);
+    const correlatedSelloff = tokensWith24hData.length >= 4 && (tokensDown3Plus.length / tokensWith24hData.length) > 0.75;
+
     // Compute hot narratives: sector where 3+ tokens pumped >5% in 24H
     const narrativeMap = {};
     initial.forEach(t => {
@@ -1264,20 +1549,36 @@ export default function App() {
       Object.entries(narrativeMap).filter(([, cnt]) => cnt >= 3).map(([n]) => n)
     );
 
-    // Second pass: apply narrative laggard boost
+    // Second pass: apply narrative laggard boost AND correlated selloff penalty
     return initial.map(t => {
+      let analysis = t.analysis;
+      let modified = false;
+
+      // Correlated selloff penalty: individual alt setups are unreliable in macro dumps
+      if (correlatedSelloff && analysis.score > 0) {
+        analysis = {
+          ...analysis,
+          score: Math.min(analysis.score, 40), // Cap at 40 during correlated dumps
+          reasons: [...analysis.reasons, `⚠ Correlated selloff — ${tokensDown3Plus.length}/${tokensWith24hData.length} tokens down >3%. Individual setups unreliable — wait for BTC reversal confirmation`],
+          correlatedSelloff: true,
+        };
+        modified = true;
+      }
+
       const isLaggard = (t.narrative || []).some(n => hotNarratives.has(n)) &&
-        (t.analysis?.change24h || 0) < 3 && t.analysis?.btcSafe;
-      if (!isLaggard) return t;
-      return {
-        ...t,
-        analysis: {
-          ...t.analysis,
-          score: t.analysis.score + 10,
-          reasons: [...t.analysis.reasons, "Narrative laggard — sector hot, token hasn't pumped yet"],
-          setupType: t.analysis.setupType === "None" ? "C: Narrative Laggard" : t.analysis.setupType,
-        },
-      };
+        (analysis?.change24h || 0) < 3 && analysis?.btcSafe;
+      if (isLaggard) {
+        analysis = {
+          ...analysis,
+          score: analysis.score + 10,
+          reasons: [...analysis.reasons, "Narrative laggard — sector hot, token hasn't pumped yet"],
+          setupType: analysis.setupType === "None" ? "C: Narrative Laggard" : analysis.setupType,
+        };
+        modified = true;
+      }
+
+      if (!isLaggard && !modified) return t;
+      return { ...t, analysis };
     });
   }, [data, tokens, btcData]);
 
@@ -1412,17 +1713,19 @@ export default function App() {
         {btcAnalysis && (
           <div className="card" style={{
             background: btcAnalysis.btcSafe
-              ? "linear-gradient(135deg, rgba(6,78,59,0.5) 0%, #0a0a12 100%)"
+              ? btcAnalysis.btcCaution
+                ? "linear-gradient(135deg, rgba(120,80,0,0.5) 0%, #0a0a12 100%)"
+                : "linear-gradient(135deg, rgba(6,78,59,0.5) 0%, #0a0a12 100%)"
               : "linear-gradient(135deg, rgba(127,29,29,0.5) 0%, #0a0a12 100%)",
-            border: `1px solid ${btcAnalysis.btcSafe ? "#065f4660" : "#991b1b60"}`,
+            border: `1px solid ${btcAnalysis.btcSafe ? btcAnalysis.btcCaution ? "#92400e60" : "#065f4660" : "#991b1b60"}`,
             borderRadius: 12, padding: 14, marginBottom: 10,
           }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: btcAnalysis.btcSafe ? "#22c55e" : "#ef4444", boxShadow: `0 0 8px ${btcAnalysis.btcSafe ? "#22c55e" : "#ef4444"}` }} />
+                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: btcAnalysis.btcSafe ? btcAnalysis.btcCaution ? "#fbbf24" : "#22c55e" : "#ef4444", boxShadow: `0 0 8px ${btcAnalysis.btcSafe ? btcAnalysis.btcCaution ? "#fbbf24" : "#22c55e" : "#ef4444"}` }} />
                   <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: 1.5 }}>
-                    BTC: {btcAnalysis.btcSafe ? "SAFE" : "⚠ RISK OFF"}
+                    BTC: {btcAnalysis.btcSafe ? btcAnalysis.btcCaution ? "⚠ CAUTION" : "SAFE" : "⚠ RISK OFF"}
                   </span>
                 </div>
                 <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 4, fontFamily: "var(--mono)" }}>
@@ -1430,6 +1733,14 @@ export default function App() {
                     {btcAnalysis.btcChange4h >= 0 ? "+" : ""}{btcAnalysis.btcChange4h.toFixed(2)}%
                   </span>
                   {" 4H · "}RSI {btcAnalysis.rsi1h?.toFixed(0)} · ${fp(btcAnalysis.currentPrice)}
+                  {btcAnalysis.btcRegime && (
+                    <span style={{ color: btcAnalysis.btcRegime.rolling12hDump > 3 ? "#f87171" : "#6b7280" }}>
+                      {" · 12H: -"}{btcAnalysis.btcRegime.rolling12hDump.toFixed(1)}%
+                    </span>
+                  )}
+                  {btcAnalysis.btcCaution && (
+                    <span style={{ color: "#fbbf24" }}>{" · Below EMAs"}</span>
+                  )}
                 </div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>

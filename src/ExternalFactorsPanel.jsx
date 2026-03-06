@@ -107,9 +107,10 @@ export default function ExternalFactorsPanel() {
   // Calendar outdated check — shown when current year > CALENDAR_YEAR
   const calendarOutdated = new Date().getFullYear() > CALENDAR_YEAR;
 
-  const riskArticles = news.filter(a =>
-    RISK_KEYWORDS.some(k => `${a.title || ""} ${a.body || ""}`.toLowerCase().includes(k))
-  );
+  const riskArticles = news.filter(a => {
+    const text = ((a.title || "") + " " + (a.body || "")).toLowerCase();
+    return RISK_KEYWORDS.some(kw => text.includes(kw));
+  });
 
   // ── Verdict — playbook Section 2 order matters, do not reorder ──
   const todayEvent    = macroEvents.find(e => e.date === today);
@@ -158,34 +159,6 @@ export default function ExternalFactorsPanel() {
     timerRef.current = setInterval(fetchAll, 15 * 60 * 1000);
     return () => clearInterval(timerRef.current);
   }, [fetchAll]);
-
-  // ── Checklist ────────────────────────────────────────────────────
-  const sentimentOk   = fng === null || (fng.value > 20 && fng.value < 85);
-  const sentimentWarn = fng !== null && (fng.value <= 35 || fng.value >= 70);
-  const checklist = [
-    {
-      auto: true,
-      pass: !todayEvent,
-      warn: !todayEvent && !!tomorrowEvent,
-      label: "No macro events within 12H",
-      detail: todayEvent ? `${todayEvent.type} TODAY 🚫` : tomorrowEvent ? `${tomorrowEvent.type} tomorrow ⚡` : "Clear",
-    },
-    {
-      auto: true,
-      pass: sentimentOk,
-      warn: sentimentOk && sentimentWarn,
-      label: "Sentiment acceptable",
-      detail: fng ? `F&G ${fng.value} — ${fng.label}` : fetching ? "Loading…" : "Unavailable",
-    },
-    {
-      auto: true,
-      pass: riskArticles.length < 3,
-      warn: riskArticles.length > 0 && riskArticles.length < 3,
-      label: "No high-risk news",
-      detail: `${riskArticles.length} risk headline${riskArticles.length !== 1 ? "s" : ""}`,
-    },
-    { auto: false, label: "Emotional state ≥7/10", detail: "Playbook §6.2 — self-assess" },
-  ];
 
   return (
     <>
@@ -311,14 +284,17 @@ export default function ExternalFactorsPanel() {
         </div>
       </div>
 
-      {/* ── Risk Headlines ── */}
+      {/* ── Latest News ── */}
       <div className="card" style={{
         background: "#12121e", border: "1px solid #1e1e2e",
         borderRadius: 12, padding: 10, marginBottom: 8,
       }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-          <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: 1.5, color: riskArticles.length > 0 ? "#f97316" : "#4b5563" }}>
-            ⚠ RISK HEADLINES{riskArticles.length > 0 ? ` (${riskArticles.length})` : " — CLEAR"}
+          <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: 1.5, color: "#6b7280" }}>
+            📰 LATEST NEWS
+            {riskArticles.length > 0 && (
+              <span style={{ marginLeft: 6, color: "#f97316" }}>· {riskArticles.length} risk flagged</span>
+            )}
           </div>
           {lastFetch && (
             <span style={{ fontSize: 9, color: "#374151", fontFamily: "var(--mono)" }}>
@@ -331,56 +307,35 @@ export default function ExternalFactorsPanel() {
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {[1, 2, 3].map(i => <div key={i} className="shimmer" style={{ height: 38, borderRadius: 6 }} />)}
           </div>
-        ) : riskArticles.length === 0 ? (
+        ) : news.length === 0 ? (
           <div style={{ fontSize: 11, color: "#374151", padding: "12px 0", textAlign: "center" }}>
-            No high-risk headlines detected
+            No news available
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 180, overflowY: "auto" }}>
-            {riskArticles.slice(0, 8).map((a, i) => (
-              <a key={i} href={a.url} target="_blank" rel="noopener noreferrer" style={{
-                display: "block",
-                background: "rgba(127,29,29,0.18)", border: "1px solid #ef444428",
-                borderRadius: 6, padding: "6px 8px", textDecoration: "none",
-              }}>
-                <div style={{ fontSize: 10, color: "#fca5a5", lineHeight: 1.45 }}>
-                  {(a.title || "").slice(0, 92)}{(a.title || "").length > 92 ? "…" : ""}
-                </div>
-                <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>
-                  {a.source_info?.name || a.source || "—"}
-                  {a.published_on ? ` · ${new Date(a.published_on * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}
-                </div>
-              </a>
-            ))}
+            {news.map((a, i) => {
+              const text = ((a.title || "") + " " + (a.body || "")).toLowerCase();
+              const isRisk = RISK_KEYWORDS.some(kw => text.includes(kw));
+              return (
+                <a key={i} href={a.url} target="_blank" rel="noopener noreferrer" style={{
+                  display: "block",
+                  background: isRisk ? "rgba(127,29,29,0.18)" : "rgba(255,255,255,0.03)",
+                  border: isRisk ? "1px solid #ef444428" : "1px solid #1e1e2e",
+                  borderRadius: 6, padding: "6px 8px", textDecoration: "none",
+                }}>
+                  <div style={{ fontSize: 10, color: isRisk ? "#fca5a5" : "#cbd5e1", lineHeight: 1.45 }}>
+                    {isRisk && <span style={{ color: "#f97316", marginRight: 4 }}>⚠</span>}
+                    {(a.title || "").slice(0, 92)}{(a.title || "").length > 92 ? "…" : ""}
+                  </div>
+                  <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>
+                    {a.source_info?.name || a.source || "—"}
+                    {a.published_on ? ` · ${new Date(a.published_on * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}
+                  </div>
+                </a>
+              );
+            })}
           </div>
         )}
-      </div>
-
-      {/* ── Pre-Trade Checklist ── */}
-      <div className="card" style={{
-        background: "#12121e", border: "1px solid #1e1e2e",
-        borderRadius: 12, padding: 10, marginBottom: 8,
-      }}>
-        <div style={{ fontSize: 9, fontWeight: 800, color: "#4b5563", letterSpacing: 1.5, marginBottom: 8 }}>
-          PRE-TRADE CHECKLIST
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {checklist.map((item, i) => {
-            const icon  = !item.auto ? "○" : !item.pass ? "✗" : item.warn ? "~" : "✓";
-            const color = !item.auto ? "#6b7280" : !item.pass ? "#ef4444" : item.warn ? "#eab308" : "#22c55e";
-            return (
-              <div key={i} style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                <span style={{ fontSize: 11, fontWeight: 900, color, minWidth: 12, fontFamily: "var(--mono)" }}>
-                  {icon}
-                </span>
-                <div style={{ flex: 1 }}>
-                  <span style={{ fontSize: 10, color: "#e2e8f0" }}>{item.label}</span>
-                  <span style={{ fontSize: 9, color: "#6b7280", marginLeft: 6 }}>{item.detail}</span>
-                </div>
-              </div>
-            );
-          })}
-        </div>
       </div>
 
       {/* ── Divider ── */}
