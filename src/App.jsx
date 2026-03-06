@@ -36,6 +36,7 @@ const NARRATIVE_COLORS = {
   AI: "#a78bfa", RWA: "#f472b6", DeFi: "#34d399",
   L1: "#60a5fa", Oracle: "#fbbf24", Infra: "#fb923c",
   L2: "#38bdf8", Gaming: "#c084fc", Meme: "#facc15",
+  POW: "#fa1593", Payment: "#eb5959"
 };
 
 // ─── Technical Analysis Functions ────────────────────────────────
@@ -1034,6 +1035,8 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState(FIREBASE_ENABLED ? "syncing" : "offline");
   const [tokenNews, setTokenNews] = useState({});   // { [symbol]: { articles, fetching, loaded } }
   const [newsOpen, setNewsOpen]   = useState(new Set()); // symbols with news panel open
+  const [quickQuery, setQuickQuery]   = useState("");
+  const [quickResult, setQuickResult] = useState(null); // { symbol, name, analysis, candles1h, status, errorMsg }
   const timerRef = useRef(null);
   const firebaseSyncRef = useRef(false); // true = local write in-flight, suppress incoming onValue echo
   const remoteUpdateRef = useRef(false); // true = processing remote data, skip trades/watchlist write-backs
@@ -1143,6 +1146,22 @@ export default function App() {
       }
       return next;
     });
+  };
+
+  const runQuickAnalyze = async () => {
+    const raw = quickQuery.trim().toUpperCase().replace(/\s/g, "");
+    if (!raw) return;
+    const symbol = raw.endsWith("USDT") ? raw : `${raw}USDT`;
+    const name   = symbol.replace("USDT", "");
+    setQuickResult({ symbol, name, analysis: null, candles1h: null, status: "loading" });
+    const candles = await fetchSingleToken(symbol);
+    if (!candles) {
+      setQuickResult({ symbol, name, analysis: null, candles1h: null, status: "error", errorMsg: `${symbol} not found on Binance — check the symbol` });
+      return;
+    }
+    const rawData  = { ...candles, symbol, name, role: "alt", narrative: [] };
+    const analysis = scoreToken(rawData, btcData);
+    setQuickResult({ symbol, name, analysis, candles1h: candles.candles1h, status: "done" });
   };
 
   const refreshBTC = async () => {
@@ -1519,6 +1538,267 @@ export default function App() {
                 <span style={{ color: "#fbbf24" }}>{w.narrative}</span>: {w.count} setups active ({w.tokens.join(", ")}) — consider limiting exposure
               </div>
             ))}
+          </div>
+        )}
+
+        {/* ── Quick Analyze ── */}
+        <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+          <div style={{ position: "relative", flex: 1 }}>
+            <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: "#818cf8", pointerEvents: "none" }}>⚡</span>
+            <input
+              value={quickQuery}
+              onChange={e => setQuickQuery(e.target.value.toUpperCase())}
+              onKeyDown={e => { if (e.key === "Enter") runQuickAnalyze(); }}
+              placeholder="Live analyze any symbol — PEPE, WIF, BONK…"
+              style={{
+                width: "100%", background: "#12121e", border: "1px solid #2a2a3e", borderRadius: 8,
+                padding: "8px 32px 8px 30px", color: "#e2e8f0", fontSize: 12,
+                fontFamily: "var(--mono)", outline: "none",
+              }}
+            />
+            {quickQuery && (
+              <button onClick={() => { setQuickQuery(""); setQuickResult(null); }} style={{
+                position: "absolute", right: 9, top: "50%", transform: "translateY(-50%)",
+                background: "none", border: "none", color: "#6b7280", cursor: "pointer", fontSize: 13, lineHeight: 1,
+              }}>✕</button>
+            )}
+          </div>
+          <button
+            onClick={runQuickAnalyze}
+            disabled={!quickQuery.trim() || quickResult?.status === "loading"}
+            style={{
+              background: "#1e1b4b", border: "1px solid #818cf840", color: "#a5b4fc",
+              borderRadius: 8, padding: "0 14px", fontSize: 12, fontWeight: 700,
+              cursor: (!quickQuery.trim() || quickResult?.status === "loading") ? "default" : "pointer",
+              opacity: !quickQuery.trim() ? 0.45 : 1, whiteSpace: "nowrap", flexShrink: 0,
+            }}
+          >
+            {quickResult?.status === "loading"
+              ? <span className="spin" style={{ display: "inline-block" }}>⟳</span>
+              : "RUN"}
+          </button>
+        </div>
+
+        {/* ── Quick Analyze Result ── */}
+        {quickResult && (
+          <div style={{ marginBottom: 10 }}>
+            {quickResult.status === "loading" && (
+              <div className="shimmer" style={{ height: 90, borderRadius: 12 }} />
+            )}
+            {quickResult.status === "error" && (
+              <div className="card" style={{
+                background: "rgba(127,29,29,0.2)", border: "1px solid #ef444430",
+                borderRadius: 12, padding: "10px 14px",
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+              }}>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 800, color: "#f87171" }}>⚡ {quickResult.symbol}</div>
+                  <div style={{ fontSize: 10, color: "#fca5a5", marginTop: 2 }}>{quickResult.errorMsg}</div>
+                </div>
+                <button onClick={() => setQuickResult(null)} style={{ background: "none", border: "none", color: "#6b7280", cursor: "pointer", fontSize: 14 }}>✕</button>
+              </div>
+            )}
+            {quickResult.status === "done" && quickResult.analysis && (() => {
+              const { symbol, name, analysis, candles1h } = quickResult;
+              const hasSetup = analysis.entry;
+              const isGood   = analysis.score >= 40 && analysis.btcSafe;
+              const bc       = hasSetup ? "#818cf860" : isGood ? "#818cf830" : "#312e81";
+              return (
+                <div className="card" style={{
+                  background: "linear-gradient(135deg, rgba(30,27,75,0.5) 0%, #0d0d18 100%)",
+                  border: `1px solid ${bc}`, borderRadius: 12, overflow: "hidden",
+                }}>
+                  {/* Header */}
+                  <div style={{ padding: "10px 14px 0", display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                    <div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 9, fontWeight: 800, color: "#818cf8", background: "#1e1b4b", border: "1px solid #818cf840", borderRadius: 4, padding: "1px 5px", letterSpacing: 1 }}>⚡ LIVE</span>
+                        <span style={{ fontSize: 15, fontWeight: 800 }}>{name}</span>
+                        <span style={{ fontSize: 10, color: "#6b7280", fontFamily: "var(--mono)" }}>{symbol}</span>
+                        <span style={{ fontSize: 9, fontWeight: 700, color: "#f97316", background: "rgba(124,45,18,0.3)", border: "1px solid #f9731630", borderRadius: 4, padding: "1px 5px" }}>NOT SAVED</span>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+                        <span style={{ fontSize: 11, color: analysis.setupType !== "None" ? "#fbbf24" : "#4b5563", fontWeight: 600 }}>{analysis.setupType}</span>
+                        {analysis.setupStatus === "CONFIRMED" && <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1, padding: "2px 5px", borderRadius: 3, background: "#16653440", color: "#4ade80", border: "1px solid #16653460" }}>CONFIRMED</span>}
+                        {analysis.setupStatus === "FORMING"   && <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1, padding: "2px 5px", borderRadius: 3, background: "#854d0e30", color: "#fbbf24", border: "1px solid #854d0e50" }}>FORMING</span>}
+                        {hasSetup && <span style={{ background: "#166534", color: "#4ade80", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 800, letterSpacing: 1 }}>SETUP</span>}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "flex-start", gap: 8, flexShrink: 0 }}>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontSize: 16, fontWeight: 800, fontFamily: "var(--mono)" }}>${fp(analysis.currentPrice)}</div>
+                        <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: analysis.change24h >= 0 ? "#4ade80" : "#f87171", fontWeight: 700 }}>
+                          {analysis.change24h >= 0 ? "+" : ""}{analysis.change24h.toFixed(2)}%
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "center" }}>
+                        <div style={{
+                          background: analysis.score >= 60 ? "#166534" : analysis.score >= 40 ? "#854d0e" : "#1e1e2e",
+                          color: analysis.score >= 60 ? "#4ade80" : analysis.score >= 40 ? "#fbbf24" : "#6b7280",
+                          border: `1px solid ${analysis.score >= 60 ? "#22c55e40" : analysis.score >= 40 ? "#f59e0b40" : "#1e1e2e"}`,
+                          borderRadius: 6, padding: "2px 7px", fontSize: 12, fontWeight: 900, fontFamily: "var(--mono)",
+                        }}>{analysis.score}</div>
+                        <button onClick={() => setQuickResult(null)} style={{ background: "none", border: "none", color: "#6b7280", cursor: "pointer", fontSize: 13, lineHeight: 1, padding: 0 }}>✕</button>
+                        <button onClick={e => toggleTokenNews(e, symbol, name)} style={{
+                          background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 12, lineHeight: 1,
+                          color: newsOpen.has(symbol) ? "#818cf8" : tokenNews[symbol]?.fetching ? "#eab308" : "#374151",
+                        }}>
+                          {tokenNews[symbol]?.fetching ? <span className="spin" style={{ display: "inline-block", fontSize: 11 }}>◌</span> : "📰"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Metrics */}
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, padding: "10px 14px" }}>
+                    <div>
+                      <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1.2, marginBottom: 3 }}>RSI 1H</div>
+                      <RSIBar value={analysis.rsi1h} />
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1.2, marginBottom: 3 }}>VOLUME</div>
+                      <span style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: analysis.volRatio >= 1.5 ? "#4ade80" : analysis.volRatio >= 0.8 ? "#fbbf24" : "#f87171" }}>
+                        {analysis.volRatio.toFixed(2)}x
+                      </span>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1.2, marginBottom: 3 }}>BTC</div>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: analysis.btcSafe ? "#4ade80" : "#f87171" }}>
+                        {analysis.btcSafe ? "SAFE" : "RISK OFF"}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div style={{ padding: "0 14px 10px", display: "flex", flexDirection: "column", gap: 10 }}>
+                    {/* Reasons */}
+                    {analysis.reasons.length > 0 && (
+                      <div>
+                        <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1.5, marginBottom: 4 }}>ANALYSIS</div>
+                        {analysis.reasons.map((r, i) => (
+                          <div key={i} style={{ fontSize: 11, color: "#94a3b8", padding: "2px 0" }}>
+                            <span style={{ color: "#818cf8", marginRight: 6 }}>›</span>{r}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Mini Chart */}
+                    {candles1h && <MiniChart candles={candles1h.slice(-40)} width={270} height={44} />}
+
+                    {/* Playbook Checklist */}
+                    {analysis.playbookChecklist && (
+                      <div style={{ background: "rgba(30,27,75,0.3)", border: "1px solid #312e8140", borderRadius: 10, padding: 12 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                          <div style={{ fontSize: 10, color: "#a5b4fc", fontWeight: 800, letterSpacing: 1.5 }}>📋 PLAYBOOK CHECKLIST</div>
+                          <span style={{
+                            fontSize: 10, fontWeight: 800, fontFamily: "var(--mono)",
+                            color: analysis.checklistPassCount === analysis.checklistTotal ? "#4ade80" : analysis.checklistPassCount >= 5 ? "#fbbf24" : "#f87171",
+                          }}>{analysis.checklistPassCount}/{analysis.checklistTotal}</span>
+                        </div>
+                        {Object.entries(analysis.playbookChecklist).map(([key, check]) => (
+                          <div key={key} style={{ display: "flex", alignItems: "center", gap: 6, padding: "3px 0", fontSize: 11 }}>
+                            <span style={{ fontSize: 13, flexShrink: 0 }}>{check.pass ? "✅" : "❌"}</span>
+                            <span style={{ color: "#94a3b8", fontWeight: 600 }}>{key.replace(/([A-Z])/g, ' $1').trim()}</span>
+                            <span style={{ color: check.pass ? "#4ade8090" : "#f8717190", fontSize: 10, fontFamily: "var(--mono)" }}>{check.value}</span>
+                          </div>
+                        ))}
+                        <div style={{
+                          marginTop: 8, padding: "6px 8px", borderRadius: 6,
+                          background: analysis.checklistPassCount === analysis.checklistTotal ? "rgba(22,101,52,0.2)" : analysis.checklistPassCount >= 5 ? "rgba(133,77,14,0.15)" : "rgba(127,29,29,0.15)",
+                          fontSize: 10, fontWeight: 700,
+                          color: analysis.checklistPassCount === analysis.checklistTotal ? "#4ade80" : analysis.checklistPassCount >= 5 ? "#fbbf24" : "#f87171",
+                        }}>
+                          {analysis.checklistVerdict}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Trade Levels */}
+                    {hasSetup && (
+                      <div style={{ background: "rgba(22,101,52,0.2)", border: "1px solid #16653440", borderRadius: 10, padding: 10 }}>
+                        <div style={{ fontSize: 9, color: "#4ade80", fontWeight: 800, letterSpacing: 1.5, marginBottom: 6 }}>📌 TRADE LEVELS</div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
+                          {[
+                            ["Entry",    fp(analysis.currentPrice),  "#f1f5f9"],
+                            ["Stop –2%", fp(analysis.playbookStop),  "#f87171"],
+                            ["TP1 +3.5%", fp(analysis.playbookTP1), "#4ade80"],
+                            ["TP2 +5%",  fp(analysis.playbookTP2),  "#22c55e"],
+                          ].map(([label, val, color]) => (
+                            <div key={label}>
+                              <div style={{ fontSize: 9, color: "#6b7280" }}>{label}</div>
+                              <div style={{ fontSize: 11, color, fontFamily: "var(--mono)", fontWeight: 700 }}>${val}</div>
+                            </div>
+                          ))}
+                        </div>
+                        <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 6, fontFamily: "var(--mono)" }}>
+                          R:R ≈ <span style={{ color: "#4ade80" }}>{analysis.rrRatio.toFixed(1)}:1</span>
+                          {" · Risk "}<span style={{ color: "#f87171" }}>{analysis.riskPct.toFixed(2)}%</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Token News */}
+                    {newsOpen.has(symbol) && (
+                      <div>
+                        <div style={{ fontSize: 9, fontWeight: 800, color: "#6b7280", letterSpacing: 1.5, marginBottom: 6 }}>
+                          📰 {name} NEWS
+                        </div>
+                        {tokenNews[symbol]?.fetching ? (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            {[1, 2].map(i => <div key={i} className="shimmer" style={{ height: 34, borderRadius: 6 }} />)}
+                          </div>
+                        ) : !tokenNews[symbol]?.articles?.length ? (
+                          <div style={{ fontSize: 10, color: "#374151", padding: "8px 0", textAlign: "center" }}>No recent news found for {name}</div>
+                        ) : (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 180, overflowY: "auto" }}>
+                            {tokenNews[symbol].articles.slice(0, 5).map((a, i) => (
+                              <a key={i} href={a.url} target="_blank" rel="noopener noreferrer" style={{
+                                display: "block", background: "#1a1a2e", border: "1px solid #2a2a3e",
+                                borderRadius: 6, padding: "6px 8px", textDecoration: "none",
+                              }}>
+                                <div style={{ fontSize: 10, color: "#e2e8f0", lineHeight: 1.4 }}>
+                                  {(a.title || "").slice(0, 90)}{(a.title || "").length > 90 ? "…" : ""}
+                                </div>
+                                <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>
+                                  {a.source_info?.name || a.source || "—"}
+                                  {a.published_on ? ` · ${new Date(a.published_on * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}
+                                </div>
+                              </a>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Unlock reminder */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", borderRadius: 8, background: "#12121e", border: "1px solid #1e1e2e" }}>
+                      <span style={{ fontSize: 13 }}>🔒</span>
+                      <div style={{ flex: 1, fontSize: 10, color: "#6b7280" }}>Check token unlocks before entry</div>
+                      <a href={`https://token.unlocks.app/${name.toLowerCase()}`} target="_blank" rel="noopener noreferrer"
+                        style={{ fontSize: 9, fontWeight: 700, color: "#818cf8", textDecoration: "none", whiteSpace: "nowrap" }}>
+                        unlocks.app →
+                      </a>
+                    </div>
+
+                    {/* Export for AI */}
+                    <button onClick={() => {
+                      const payload = buildExportPayload(symbol, name, [], analysis, btcAnalysis);
+                      navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+                      setCopied(symbol);
+                      setTimeout(() => setCopied(null), 2000);
+                    }} style={{
+                      width: "100%", padding: "10px 0", borderRadius: 8,
+                      background: copied === symbol ? "#166534" : "#1e1b4b",
+                      border: `1px solid ${copied === symbol ? "#22c55e50" : "#312e8180"}`,
+                      color: copied === symbol ? "#4ade80" : "#a5b4fc",
+                      fontSize: 12, fontWeight: 800, letterSpacing: 1.2, cursor: "pointer", transition: "all 0.2s",
+                    }}>
+                      {copied === symbol ? "COPIED — PASTE INTO AI" : "COPY FOR AI ANALYSIS"}
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         )}
 
