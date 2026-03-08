@@ -1,5 +1,4 @@
-node_modules
-dist
-.vercel
-.env
-.DS_Store
+```gitignore
+# No build artifacts, dependencies, or temporary files detected in changes
+# Only source/config files present
+```
