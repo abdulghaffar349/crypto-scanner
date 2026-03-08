@@ -234,3 +234,50 @@ Paste this payload into Claude along with your chart screenshots for precise tra
 | **Session Awareness** | Asian/London/US session detection, transition risk warnings |
 | **Trade Validation** | 7-point playbook checklist, Setup A/B/C classification |
 | **Risk Management** | Hard rejection gates, signal candle volume requirement |
+| **Live Analysis** | On-demand analysis of any Binance symbol (PEPE, WIF, BONK, etc.) without adding to watchlist |
+
+---
+
+## ⚡ Live Analysis Feature
+
+The **Live Analyze** tool lets you instantly analyze any Binance-listed token without adding it to your permanent watchlist. Perfect for checking meme coins, new listings, or one-off setups.
+
+### How to Use
+
+1. Find the **⚡ Quick Analyze** input box below the External Factors panel
+2. Type any symbol (with or without USDT suffix): `PEPE`, `WIF`, `BONK`, `POPCAT`, etc.
+3. Press **Enter** or click **RUN**
+4. View instant analysis including:
+   - Current price and 24H change
+   - Setup type (A/B/C) with FORMING/CONFIRMED status
+   - Full technical indicators (RSI, MACD, BB, ATR, volume)
+   - Support/resistance levels
+   - Pattern detection with confirmation strength
+   - Score and BTC safety check
+   - Entry/stop/TP levels with R:R ratios
+
+### Key Benefits
+
+- **No watchlist clutter**: Analyzed tokens don't pollute your main scanner view
+- **Instant results**: Fetches and analyzes in ~2 seconds
+- **Full playbook scoring**: Same rigorous scoring as watchlist tokens
+- **NOT SAVED badge**: Clear visual indicator that this is a temporary analysis
+- **Export ready**: Can still generate AI export payload for Claude analysis
+
+### Example Workflow
+
+```
+1. See PEPE pumping on Twitter
+2. Type "PEPE" in Quick Analyze
+3. See it has Setup B (FVG reclaim) with score 52
+4. Click 📤 to copy AI payload
+5. Screenshot 1H/4H charts from TradingView
+6. Send to Claude for entry confirmation
+```
+
+### Limitations
+
+- Results are **temporary** — cleared when you close the card or refresh
+- Token is **not saved** to localStorage or Firebase
+- Must re-run analysis to get updated data
+- Only works for tokens listed on Binance spot market
