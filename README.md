@@ -84,6 +84,44 @@ Click the ⚙ gear icon in the app header to:
 
 **Score ≥ 40 + BTC safe → Worth screenshotting for AI analysis**
 
+## Signal Volume Gate
+
+The signal volume gate validates buyer conviction on the confirmation candle using **context-aware comparison**:
+
+### Primary Method: Relative-to-Dip Comparison
+Instead of comparing signal candle volume against the 20-period MA (which gets inflated during bull runs), the gate compares against the average volume of the **preceding dip candles**:
+
+1. Collects 2-5 consecutive dip candles (close ≤ open, includes dojis)
+2. Weights the most recent 3 candles at 60% if 4-5 are collected
+3. Applies session-specific thresholds:
+
+| Session | Threshold | Rationale |
+|---------|-----------|-----------|
+| Asian (00-08 UTC) | >1.05× | Low bar — any buyer re-engagement counts |
+| London (08-16 UTC) | >1.15× | Standard — reliable volume |
+| Overlap (13-16 UTC) | >1.20× | Highest bar — peak liquidity |
+| US (13-22 UTC) | >1.15× | Standard |
+| OFF-HOURS | Skip | No entries permitted |
+
+### Secondary Method: Volume Trend Rising
+If signal volume is below dip average, the gate passes with **LOW confidence** if volume is rising across the last 3 candles (≥66% of transitions rising).
+
+### Fallback Method: Median Comparison
+If insufficient dip context exists (flat market, no prior dip), falls back to median-based 20-period comparison (outlier-resistant).
+
+### Export Fields
+The JSON export includes detailed signal volume context:
+```json
+"volume": {
+  "signalVolumeOk": true,
+  "signalVolumeMethod": "dip_avg_confirmed",
+  "signalVolumeConfidence": "HIGH",
+  "dipAvgVolume": "42500",
+  "signalVsAip": "1.34",
+  "signalVolumeNote": "Signal vol 134% of dip avg — buyers confirmed"
+}
+```
+
 ## Workflow
 
 1. Open scanner on your phone

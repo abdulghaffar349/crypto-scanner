@@ -369,6 +369,142 @@ function getSessionAdjustedVolume(rawRatio, session) {
   return { raw: rawRatio, adjusted, grade, score, note, session };
 }
 
+// ─── Signal Volume Gate Utilities ────────────────────────────────
+// Session-specific thresholds for signal volume comparison
+const SESSION_THRESHOLDS = {
+  ASIAN: 1.05,
+  LONDON: 1.15,
+  OVERLAP: 1.20,
+  US: 1.15,
+  "OFF-HOURS": null,
+};
+
+function getSessionThreshold(session) {
+  const threshold = SESSION_THRESHOLDS[session];
+  if (threshold === null) {
+    return { skip: true, reason: "OFF_HOURS — no entries permitted" };
+  }
+  return { skip: false, threshold };
+}
+
+// Collect up to 5 consecutive dip candles (close <= open, includes dojis)
+// Weight the most recent 3 at 60% if 4-5 candles collected
+function getDipCandleAvgVolume(candles, signalIndex) {
+  const DIP_LOOKBACK_MAX = 5;
+  const DIP_LOOKBACK_MIN = 2;
+  const dipVolumes = [];
+
+  for (let i = signalIndex - 1; i >= 0 && dipVolumes.length < DIP_LOOKBACK_MAX; i--) {
+    const candleOpen = parseFloat(candles[i][1]);
+    const candleClose = parseFloat(candles[i][4]);
+    if (candleClose <= candleOpen) {
+      dipVolumes.unshift(parseFloat(candles[i][5]));
+    } else {
+      break;
+    }
+  }
+
+  if (dipVolumes.length < DIP_LOOKBACK_MIN) return null;
+
+  // Weight recent 3 candles at 60% if 4-5 collected
+  if (dipVolumes.length >= 4) {
+    const recent = dipVolumes.slice(-3);
+    const earlier = dipVolumes.slice(0, -3);
+    const recentAvg = recent.reduce((a, b) => a + b, 0) / recent.length;
+    const earlierAvg = earlier.reduce((a, b) => a + b, 0) / earlier.length;
+    return (recentAvg * 0.6) + (earlierAvg * 0.4);
+  }
+
+  return dipVolumes.reduce((a, b) => a + b, 0) / dipVolumes.length;
+}
+
+// Check if volume trend is rising across last N candles (at least 66% of transitions must be rising)
+function isVolumeTrendRising(candles, signalIndex, lookback = 3) {
+  const recentVolumes = candles
+    .slice(Math.max(0, signalIndex - lookback), signalIndex + 1)
+    .map(c => parseFloat(c[5]));
+
+  if (recentVolumes.length < 2) return false;
+
+  let risingCount = 0;
+  for (let i = 1; i < recentVolumes.length; i++) {
+    if (recentVolumes[i] > recentVolumes[i - 1]) risingCount++;
+  }
+
+  return risingCount >= Math.floor(lookback * 0.66);
+}
+
+// Median-based volume (outlier-resistant alternative to mean)
+function volumeMedian(candles, period = 20) {
+  const volumes = candles
+    .slice(-period)
+    .map(c => parseFloat(c[5]))
+    .sort((a, b) => a - b);
+
+  const mid = Math.floor(volumes.length / 2);
+  return volumes.length % 2 !== 0
+    ? volumes[mid]
+    : (volumes[mid - 1] + volumes[mid]) / 2;
+}
+
+// Compound signal volume check: dip avg comparison (primary) + trend rising (secondary) + median fallback
+function checkSignalVolumeOk(candles, currentIndex, session, volumeMA20) {
+  const signalVolume = parseFloat(candles[currentIndex][5]);
+  const { skip, threshold, reason } = getSessionThreshold(session);
+
+  if (skip) {
+    return { pass: null, method: "skipped", confidence: "NONE", note: reason };
+  }
+
+  const dipAvgVolume = getDipCandleAvgVolume(candles, currentIndex);
+
+  let aboveDipAvg = false;
+  let trendRising = false;
+  let method = "";
+  let confidence = "NONE";
+
+  if (dipAvgVolume && dipAvgVolume > 0) {
+    aboveDipAvg = signalVolume > dipAvgVolume * threshold;
+    trendRising = isVolumeTrendRising(candles, currentIndex, 3);
+
+    if (aboveDipAvg) {
+      method = "dip_avg_confirmed";
+      confidence = "HIGH";
+    } else if (trendRising) {
+      method = "trend_rising_only";
+      confidence = "LOW";
+    } else {
+      method = "both_failed";
+      confidence = "NONE";
+    }
+  } else {
+    // Fallback: insufficient dip context — use median comparison
+    const medianVol = volumeMedian(candles, 20);
+    aboveDipAvg = signalVolume > medianVol;
+    method = "median_fallback";
+    confidence = aboveDipAvg ? "MEDIUM" : "NONE";
+  }
+
+  const pass = aboveDipAvg || trendRising;
+
+  return {
+    pass,
+    method,
+    confidence,
+    dipAvgVolume: dipAvgVolume?.toFixed(0) ?? null,
+    signalVsAip: dipAvgVolume ? (signalVolume / dipAvgVolume).toFixed(2) : null,
+    note: method === "dip_avg_confirmed"
+      ? `Signal vol ${(signalVolume / dipAvgVolume * 100).toFixed(0)}% of dip avg — buyers confirmed`
+      : method === "trend_rising_only"
+        ? "Trend rising but below dip avg — weak buyer re-engagement"
+        : method === "median_fallback"
+          ? aboveDipAvg
+            ? "Median fallback — sufficient volume vs median"
+            : "Median fallback — volume below median"
+          : "Both checks failed — no buyer confirmation",
+  };
+}
+
 // Extract the high/low range formed during the most recent Asian session candles
 function detectAsianRange(candles1h) {
   if (!candles1h || candles1h.length < 4) return null;
@@ -470,8 +606,6 @@ function scoreToken(data, btcData) {
   const recentVol = volumes1h.slice(-5).reduce((a, b) => a + b, 0) / 5;
   const avgVol20 = volumes1h.slice(-20).reduce((a, b) => a + b, 0) / 20;
   const volRatio = avgVol20 > 0 ? recentVol / avgVol20 : 0;
-  // Playbook: volume on the signal candle itself must exceed 20MA
-  const signalCandleVolOk = avgVol20 > 0 && volumes1h[volumes1h.length - 1] > avgVol20;
 
   // ATR needed early for proportional candle validation
   const atr = calcATR(candles1h);
@@ -487,6 +621,11 @@ function scoreToken(data, btcData) {
 
   // Session-adjusted volume
   const sessionVolume = getSessionAdjustedVolume(volRatio, sessionInfo.session);
+
+  // Signal volume gate: compound check (dip avg + trend rising + median fallback)
+  const signalVolumeResult = checkSignalVolumeOk(candles1h, candles1h.length - 1, sessionInfo.session, avgVol20);
+  console.log("signalVolumeResult: ", JSON.stringify(signalVolumeResult))
+  const signalCandleVolOk = signalVolumeResult.pass ?? false; // Backward-compatible boolean
 
   // New indicators (ATR already calculated above for candle proportionality)
   const macd = calcMACD(closes1h);
@@ -804,6 +943,9 @@ function scoreToken(data, btcData) {
     candleConfirmed: confirmationStrength === "HIGH" && bullish,
     volumeOk: sessionVolume.adjusted >= 0.8,  // session-adjusted
     signalVolumeOk: signalCandleVolOk,
+    signalVolumeMethod: signalVolumeResult.method,
+    signalVolumeConfidence: signalVolumeResult.confidence,
+    signalVolumeNote: signalVolumeResult.note,
     btcStable: btcSafe,
   };
   const setupAMet = Object.values(setupACriteria).filter(Boolean).length;
@@ -843,7 +985,12 @@ function scoreToken(data, btcData) {
   // If signal candle lacks volume, cap score and prevent CONFIRMED status
   if (!signalCandleVolOk && setupType !== "None" && !hardReject) {
     if (score > 50) score = 50;
-    reasons.push("⚠ Signal candle volume below 20MA — buying pressure unconfirmed (hard gate)");
+    const gateNote = signalVolumeResult.confidence === "LOW"
+      ? "⚠ Signal candle volume — trend rising only (weak confirmation)"
+      : signalVolumeResult.method === "skipped"
+        ? `⚠ Signal volume check skipped — ${signalVolumeResult.note}`
+        : "⚠ Signal candle volume below threshold — buying pressure unconfirmed (hard gate)";
+    reasons.push(gateNote);
     if (setupStatus === "CONFIRMED") setupStatus = "FORMING";
   }
 
@@ -899,6 +1046,8 @@ function scoreToken(data, btcData) {
     setupACriteria, setupAMet, setupATotal, setupAMissing,
     // Session-adjusted volume
     sessionVolume,
+    // Signal volume gate details (new)
+    signalVolumeResult,
     // Volume polarity
     volumePolarity, volumePolarityBearish, sellVolumeCandles, buyVolumeCandles,
     // Volatility regime
@@ -985,6 +1134,13 @@ function buildExportPayload(symbol, name, narrative, analysis, btcAnalysis) {
       polarityBearish: a.volumePolarityBearish || false,
       sellCandles: a.sellVolumeCandles || 0,
       buyCandles: a.buyVolumeCandles || 0,
+      // Signal volume gate details (new)
+      signalVolumeOk: a.signalVolumeResult?.pass ?? null,
+      signalVolumeMethod: a.signalVolumeResult?.method || null,
+      signalVolumeConfidence: a.signalVolumeResult?.confidence || null,
+      dipAvgVolume: a.signalVolumeResult?.dipAvgVolume || null,
+      signalVsAip: a.signalVolumeResult?.signalVsAip || null,
+      signalVolumeNote: a.signalVolumeResult?.note || null,
     },
     structure: {
       pattern: a.pattern,
