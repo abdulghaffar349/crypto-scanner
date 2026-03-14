@@ -84,6 +84,49 @@ Click the ⚙ gear icon in the app header to:
 
 **Score ≥ 40 + BTC safe → Worth screenshotting for AI analysis**
 
+## Session Transition Protection
+
+Prevents losses from session-transition timing by adding four protection layers:
+
+### ATR Exhaustion Filter
+Measures how much of BTC's expected daily range (ATR-14 on 1D) has been consumed. Blocks entries when the daily move is exhausted.
+
+| Exhaustion % | Label | Action |
+|---|---|---|
+| 0–40% | FRESH | Normal entry rules |
+| 40–60% | MODERATE | Flagged in verdict |
+| 60–80% | STRETCHED | Confidence forced to LOW, reduced TP targets |
+| 80%+ | EXHAUSTED | Hard no-entry gate |
+
+### Pre-US Hard Cutoff Timer
+Time-based warning system for the US session transition danger window:
+
+| Time (UTC) | Level | Action |
+|---|---|---|
+| Before 11:00 | CLEAR | No warning |
+| 11:00–12:00 | APPROACHING | Informational note |
+| 12:00–12:30 | IMMINENT | Confidence downgrade |
+| 12:30–14:00 | DANGER_ZONE | Hard no-entry gate |
+| After 14:00 | US_ACTIVE | Normal US session rules |
+
+On macro event days (FOMC/CPI/NFP), DANGER_ZONE extends to start at 12:00 UTC.
+
+### Session-Aware TP Adjustment
+When ATR exhaustion exceeds 50%, TP targets are automatically reduced:
+
+| Condition | TP1 | TP2 | Stop |
+|---|---|---|---|
+| Standard (<50%) | 3.5% | 5.0% | 2.0% |
+| Reduced (50–70%) | 2.5% | 4.0% | 2.0% |
+| Minimal (70–80%) | 2.0% | 3.0% | 1.5% |
+
+### Accumulation/Distribution Phase Detector
+Classifies BTC's current microstructure by analyzing the last 12 hourly candles for accumulation (small bodies, low volume, RSI 35-55) vs distribution (long upper wicks, volume spikes on red candles, RSI 60-70) signals.
+
+Labels: ACCUMULATION → LIKELY_ACCUMULATION → NEUTRAL → LIKELY_DISTRIBUTION → DISTRIBUTION
+
+Distribution phases downgrade setup confidence; this is observational, not a hard gate.
+
 ## Signal Volume Gate
 
 The signal volume gate validates buyer conviction on the confirmation candle using **context-aware comparison**:

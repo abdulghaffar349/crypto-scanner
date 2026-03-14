@@ -356,6 +356,178 @@ function getSessionInfo() {
   };
 }
 
+// ─── ATR Exhaustion Filter ────────────────────────────────────────
+// Measures how much of BTC's expected daily range has been consumed
+function getATRExhaustion(btcDailyCandles, btcCandles1h) {
+  if (!btcDailyCandles || btcDailyCandles.length < 15) return null;
+
+  const btcDailyATR = calcATR(btcDailyCandles, 14);
+  if (!btcDailyATR || btcDailyATR <= 0) return null;
+
+  const currentBtcPrice = parseFloat(btcDailyCandles[btcDailyCandles.length - 1][4]);
+
+  // Session low/high: lowest/highest BTC price since 00:00 UTC today from 1H candles
+  const now = new Date();
+  const todayStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const todayCandles = (btcCandles1h || []).filter(c => c[0] >= todayStart);
+  const sessionLow = todayCandles.length > 0
+    ? Math.min(...todayCandles.map(c => parseFloat(c[3])))
+    : parseFloat(btcDailyCandles[btcDailyCandles.length - 1][3]);
+  const sessionHigh = todayCandles.length > 0
+    ? Math.max(...todayCandles.map(c => parseFloat(c[2])))
+    : parseFloat(btcDailyCandles[btcDailyCandles.length - 1][2]);
+
+  // Edge case: use lower of session low vs yesterday's close as baseline
+  const yesterdayClose = parseFloat(btcDailyCandles[btcDailyCandles.length - 2][4]);
+  const effectiveLow = Math.min(sessionLow, yesterdayClose);
+
+  // Measure both directions — in a downtrend, downside exhaustion matters
+  const upsideExhaustion = ((currentBtcPrice - effectiveLow) / btcDailyATR) * 100;
+  const downsideExhaustion = ((sessionHigh - currentBtcPrice) / btcDailyATR) * 100;
+  const exhaustionPct = Math.max(upsideExhaustion, downsideExhaustion);
+  const rangeUsed = Math.max(currentBtcPrice - effectiveLow, sessionHigh - currentBtcPrice);
+
+  let label, color;
+  if (exhaustionPct < 40)      { label = "FRESH";     color = "#4ade80"; }
+  else if (exhaustionPct < 60) { label = "MODERATE";  color = "#fbbf24"; }
+  else if (exhaustionPct < 80) { label = "STRETCHED"; color = "#f97316"; }
+  else                         { label = "EXHAUSTED"; color = "#f87171"; }
+
+  return {
+    exhaustionPct, upsideExhaustion, downsideExhaustion, rangeUsed,
+    btcDailyATR, sessionLow, sessionHigh, effectiveLow, currentBtcPrice,
+    label, color,
+    isHardReject: exhaustionPct >= 80,
+    forceConfidenceLow: exhaustionPct >= 60,
+  };
+}
+
+// ─── Pre-US Hard Cutoff Timer ────────────────────────────────────
+// Warns/blocks entries approaching US session open
+function getUSTransitionInfo(noMajorEventsPass) {
+  const now = new Date();
+  const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
+
+  // Extend danger zone earlier on macro event days
+  const dangerStart = noMajorEventsPass ? 750 : 720; // 12:30 or 12:00 UTC
+
+  let phase, color;
+  if (utcMins < 660)            { phase = "CLEAR";       color = "#4ade80"; }
+  else if (utcMins < 720)      { phase = "APPROACHING"; color = "#fbbf24"; }
+  else if (utcMins < dangerStart) { phase = "IMMINENT";    color = "#f97316"; }
+  else if (utcMins < 840)      { phase = "DANGER_ZONE"; color = "#f87171"; }
+  else                          { phase = "US_ACTIVE";   color = "#22c55e"; }
+
+  const minsToUS = utcMins < 780 ? 780 - utcMins : 0;
+
+  return {
+    phase, color, minsToUS,
+    isHardBlock: phase === "DANGER_ZONE",
+    isConfidenceDowngrade: phase === "IMMINENT",
+  };
+}
+
+// ─── Accumulation/Distribution Phase Detector ────────────────────
+// Classifies BTC microstructure over last 12 hourly candles
+function detectSessionPhase(btcCandles1h) {
+  if (!btcCandles1h || btcCandles1h.length < 12) return null;
+
+  const recent = btcCandles1h.slice(-12);
+  const closes = recent.map(c => parseFloat(c[4]));
+  const volumes = recent.map(c => parseFloat(c[5]));
+  const avgVol = volumes.reduce((a, b) => a + b, 0) / volumes.length;
+
+  let score = 0;
+  const accumSignals = [];
+  const distribSignals = [];
+
+  const rsi = calcRSI(closes);
+
+  // 1. Small bodies (consolidation): >60% of candles have body < 40% of range
+  const smallBodies = recent.filter(c => {
+    const o = parseFloat(c[1]), h = parseFloat(c[2]), l = parseFloat(c[3]), cl = parseFloat(c[4]);
+    const range = h - l;
+    return range > 0 && Math.abs(cl - o) / range < 0.4;
+  }).length;
+  if (smallBodies >= 7) { score++; accumSignals.push("Small candle bodies (quiet accumulation)"); }
+
+  // 2. Low volume (absorption)
+  const lowVolCandles = volumes.filter(v => v < avgVol).length;
+  if (lowVolCandles >= 7) { score++; accumSignals.push("Low volume (buyer absorption)"); }
+
+  // 3. RSI in accumulation zone (35-55) or distribution zone (60-70)
+  if (rsi !== null && rsi >= 35 && rsi <= 55) { score++; accumSignals.push(`RSI ${rsi.toFixed(0)} (accumulation zone)`); }
+  if (rsi !== null && rsi >= 60 && rsi <= 70) { score--; distribSignals.push(`RSI ${rsi.toFixed(0)} (distribution zone)`); }
+
+  // 4. No large red candles = accumulation; many = distribution
+  const largeRedCandles = recent.filter(c => {
+    const o = parseFloat(c[1]), cl = parseFloat(c[4]), h = parseFloat(c[2]), l = parseFloat(c[3]);
+    return cl < o && Math.abs(cl - o) > (h - l) * 0.6;
+  }).length;
+  if (largeRedCandles === 0) { score++; accumSignals.push("No large red candles"); }
+  if (largeRedCandles >= 3) { score--; distribSignals.push("Multiple large red candles"); }
+
+  // 5. Long upper wicks (sellers rejecting higher prices)
+  const longUpperWicks = recent.filter(c => {
+    const o = parseFloat(c[1]), h = parseFloat(c[2]), cl = parseFloat(c[4]);
+    const upperWick = h - Math.max(o, cl);
+    const body = Math.abs(cl - o) || 0.0001;
+    return upperWick > body * 1.5;
+  }).length;
+  if (longUpperWicks >= 4) { score--; distribSignals.push("Long upper wicks (selling pressure)"); }
+
+  // 6. Volume spikes on red candles (aggressive selling)
+  const volSpikeRed = recent.filter(c => {
+    const o = parseFloat(c[1]), cl = parseFloat(c[4]), v = parseFloat(c[5]);
+    return cl < o && v > avgVol * 1.5;
+  }).length;
+  if (volSpikeRed >= 2) { score--; distribSignals.push("Volume spikes on red candles"); }
+
+  let label, color;
+  if (score >= 3)       { label = "ACCUMULATION";        color = "#4ade80"; }
+  else if (score >= 1)  { label = "LIKELY_ACCUMULATION"; color = "#86efac"; }
+  else if (score >= -1) { label = "NEUTRAL";             color = "#94a3b8"; }
+  else if (score >= -2) { label = "LIKELY_DISTRIBUTION"; color = "#fbbf24"; }
+  else                  { label = "DISTRIBUTION";        color = "#f87171"; }
+
+  return {
+    score, label, color,
+    signals: { accumulation: accumSignals, distribution: distribSignals },
+    isDistribution: score <= -2,
+    isConfidenceDowngrade: score <= -1,
+  };
+}
+
+// ─── Session-Aware TP Adjustment ─────────────────────────────────
+// Reduces TP targets when daily range is largely consumed
+function getAdjustedTPLevels(currentPrice, exhaustionPct) {
+  let tp1Pct, tp2Pct, stopPct, tier;
+
+  if (exhaustionPct >= 80) {
+    return { tier: "NO_ENTRY", tp1: null, tp2: null, stop: null, tp1Pct: 0, tp2Pct: 0, stopPct: 0, rr: 0, valid: false, active: false };
+  } else if (exhaustionPct >= 70) {
+    tp1Pct = 0.02; tp2Pct = 0.03; stopPct = 0.015; tier = "MINIMAL";
+  } else if (exhaustionPct >= 50) {
+    tp1Pct = 0.025; tp2Pct = 0.04; stopPct = 0.02; tier = "REDUCED";
+  } else {
+    return { tier: "STANDARD", tp1: null, tp2: null, stop: null, tp1Pct: 3.5, tp2Pct: 5.0, stopPct: 2.0, rr: 1.75, valid: true, active: false };
+  }
+
+  const tp1 = currentPrice * (1 + tp1Pct);
+  const tp2 = currentPrice * (1 + tp2Pct);
+  const stop = currentPrice * (1 - stopPct);
+  const rr = +(tp1Pct / stopPct).toFixed(2);
+
+  return {
+    tier, tp1, tp2, stop,
+    tp1Pct: +(tp1Pct * 100).toFixed(1),
+    tp2Pct: +(tp2Pct * 100).toFixed(1),
+    stopPct: +(stopPct * 100).toFixed(1),
+    rr, valid: rr >= 1.0, active: true,
+    regime: "session_conflict",
+  };
+}
+
 // Session-adjusted volume: normalizes raw volume against what's expected for the current session
 function getSessionAdjustedVolume(rawRatio, session) {
   const profile = SESSION_PROFILES[session] || SESSION_PROFILES["OFF-HOURS"];
@@ -588,7 +760,7 @@ function detectLiquiditySweep(candles, supports, resistances, asianRange) {
 }
 
 // ─── Scoring Engine ──────────────────────────────────────────────
-function scoreToken(data, btcData) {
+function scoreToken(data, btcData, btcDailyCandles = null) {
   const { candles1h, candles4h } = data;
   if (!candles1h || !candles4h || candles1h.length < 50) return null;
 
@@ -618,6 +790,12 @@ function scoreToken(data, btcData) {
   const sessionInfo    = getSessionInfo();
   const asianRange     = detectAsianRange(candles1h);
   const liquiditySweep = detectLiquiditySweep(candles1h, supports, resistances, asianRange);
+
+  // Session transition protection
+  const atrExhaustion = btcDailyCandles ? getATRExhaustion(btcDailyCandles, btcData?.candles1h) : null;
+  const usTransition = getUSTransitionInfo(!sessionInfo.inDangerWindow);
+  const btcPhase = detectSessionPhase(btcData?.candles1h);
+  const adjustedTP = atrExhaustion ? getAdjustedTPLevels(currentPrice, atrExhaustion.exhaustionPct) : null;
 
   // Session-adjusted volume
   const sessionVolume = getSessionAdjustedVolume(volRatio, sessionInfo.session);
@@ -718,6 +896,8 @@ function scoreToken(data, btcData) {
   else if (rsi1h !== null && rsi1h > 70) hardReject = "RSI overbought (>70)";
   else if (sessionVolume.grade === "DEAD" && !isVolumeClimax)
                                          hardReject = `Dead volume (${sessionVolume.adjusted.toFixed(2)}x session-adjusted)`;
+  else if (atrExhaustion?.isHardReject)  hardReject = `BTC daily range exhausted (${atrExhaustion.exhaustionPct.toFixed(0)}% of ATR consumed — ${atrExhaustion.label})`;
+  else if (usTransition?.isHardBlock)    hardReject = `US session danger zone — no new entries (${usTransition.minsToUS > 0 ? usTransition.minsToUS + "min to US open" : "US transition active"})`;
 
   let score = 0;
   let reasons = [];
@@ -866,6 +1046,25 @@ function scoreToken(data, btcData) {
     }
     if (asianRange?.isTight && sessionInfo.inAsian) {
       reasons.push(`Asian range tight (${asianRange.rangePct.toFixed(2)}%) — big move expected at session open`);
+    }
+
+    // ── Session Transition Protection ──
+    if (atrExhaustion?.forceConfidenceLow && !atrExhaustion.isHardReject) {
+      score -= 10;
+      reasons.push(`ATR ${atrExhaustion.label} (${atrExhaustion.exhaustionPct.toFixed(0)}% consumed) — confidence LOW, reduced TP targets`);
+    }
+    if (usTransition?.isConfidenceDowngrade) {
+      score -= 5;
+      reasons.push(`US session imminent (${usTransition.minsToUS}min) — confidence downgraded`);
+    }
+    if (btcPhase?.isConfidenceDowngrade) {
+      score -= 10;
+      const topSignals = [...(btcPhase.signals.distribution || [])].slice(0, 2).join(", ");
+      reasons.push(`BTC phase: ${btcPhase.label}${topSignals ? ` — ${topSignals}` : ""}`);
+    }
+    if (adjustedTP && !adjustedTP.valid && adjustedTP.active && setupType !== "None") {
+      score -= 15;
+      reasons.push(`Adjusted R:R < 1:1 (${adjustedTP.rr}:1 at ${adjustedTP.tier} tier) — trade invalid after session adjustment`);
     }
 
     // ── Asian Range Breakdown ──
@@ -1024,6 +1223,7 @@ function scoreToken(data, btcData) {
     noMajorEvents:       { pass: !sessionInfo.inDangerWindow, value: sessionInfo.inDangerWindow ? `${sessionInfo.nextSession} open in ${sessionInfo.minsToNext}min` : "No events detected" },
     rsiInZone:           { pass: rsi1h !== null && rsi1h >= 30 && rsi1h <= 40, value: rsi1h !== null ? `RSI ${rsi1h.toFixed(1)}` : "N/A" },
     candleConfirmation:  { pass: confirmationStrength === "HIGH" && bullish && proportional, value: confirmationStrength === "HIGH" && proportional ? `${pattern} (confirmed, proportional)` : confirmationStrength === "HIGH" ? `${pattern} (confirmed but disproportionate)` : `${pattern} (${confirmationStrength.toLowerCase()})` },
+    atrNotExhausted:     { pass: !atrExhaustion || atrExhaustion.exhaustionPct < 60, value: atrExhaustion ? `${atrExhaustion.label} (${atrExhaustion.exhaustionPct.toFixed(0)}% of daily ATR)` : "No BTC daily data" },
   };
   const checklistPassCount = Object.values(playbookChecklist).filter(c => c.pass).length;
   const checklistTotal = Object.keys(playbookChecklist).length;
@@ -1059,6 +1259,8 @@ function scoreToken(data, btcData) {
     macd, inUptrend, trendStrength, atr, bb, roc, momentumImproving,
     volSpike, volContext, isVolumeClimax,
     sessionInfo, asianRange, asianRangeBreakdown, liquiditySweep, sessionAdjustedStop,
+    // Session transition protection
+    atrExhaustion, usTransition, btcPhase, adjustedTP,
   };
 }
 
@@ -1081,6 +1283,27 @@ function buildExportPayload(symbol, name, narrative, analysis, btcAnalysis) {
       transitionRisk: a.sessionInfo?.sessionTransitionRisk,
       rules: a.sessionInfo?.rules || null,
     },
+    atrExhaustion: a.atrExhaustion ? {
+      exhaustionPct: +a.atrExhaustion.exhaustionPct.toFixed(1),
+      label: a.atrExhaustion.label,
+      btcDailyATR: +a.atrExhaustion.btcDailyATR.toFixed(2),
+      sessionLow: +a.atrExhaustion.sessionLow.toFixed(2),
+      sessionHigh: +a.atrExhaustion.sessionHigh.toFixed(2),
+      rangeUsed: +a.atrExhaustion.rangeUsed.toFixed(2),
+      verdict: a.atrExhaustion.isHardReject ? "DAILY RANGE EXHAUSTED — NO ENTRY" : a.atrExhaustion.forceConfidenceLow ? "Range stretched — reduced confidence" : "Range available",
+    } : null,
+    usTransition: a.usTransition ? {
+      phase: a.usTransition.phase,
+      minsToUS: a.usTransition.minsToUS,
+      isHardBlock: a.usTransition.isHardBlock,
+      recommendation: a.usTransition.isHardBlock ? "PRE-US DANGER ZONE — No new entries" : a.usTransition.isConfidenceDowngrade ? "US session imminent — downgrade confidence" : a.usTransition.phase === "APPROACHING" ? "US session approaching — plan exit before 13:00 UTC" : null,
+    } : null,
+    sessionPhase: a.btcPhase ? {
+      phase: a.btcPhase.label,
+      score: a.btcPhase.score,
+      signals: a.btcPhase.signals,
+      recommendation: a.btcPhase.isDistribution ? "Distribution detected — avoid new entries" : a.btcPhase.isConfidenceDowngrade ? "Distribution signals present — downgrade confidence" : null,
+    } : null,
     btc: {
       safe: a.btcSafe,
       caution: a.btcCaution || false,
@@ -1201,6 +1424,18 @@ function buildExportPayload(symbol, name, narrative, analysis, btcAnalysis) {
       riskPct: +a.riskPct.toFixed(2),
       rrRatio: +a.rrRatio.toFixed(2),
       playbookRR: +a.playbookBlendedRR.toFixed(2),
+      adjustedTP: a.adjustedTP?.active ? {
+        tier: a.adjustedTP.tier,
+        tp1: a.adjustedTP.tp1,
+        tp2: a.adjustedTP.tp2,
+        stop: a.adjustedTP.stop,
+        tp1Pct: a.adjustedTP.tp1Pct,
+        tp2Pct: a.adjustedTP.tp2Pct,
+        stopPct: a.adjustedTP.stopPct,
+        rr: a.adjustedTP.rr,
+        valid: a.adjustedTP.valid,
+        regime: a.adjustedTP.regime,
+      } : null,
     },
   };
 }
@@ -1458,10 +1693,10 @@ export default function App() {
   const [selected, setSelected] = useState(new Set());
   const [searchQuery, setSearchQuery] = useState("");
   const [syncStatus, setSyncStatus] = useState(FIREBASE_ENABLED ? "syncing" : "offline");
-  const [tokenNews, setTokenNews] = useState({});   // { [symbol]: { articles, fetching, loaded } }
-  const [newsOpen, setNewsOpen]   = useState(new Set()); // symbols with news panel open
   const [quickQuery, setQuickQuery]   = useState("");
   const [quickResult, setQuickResult] = useState(null); // { symbol, name, analysis, candles1h, status, errorMsg }
+  const [showScrollTop, setShowScrollTop] = useState(false);
+  const [btcDaily, setBtcDaily] = useState(null); // BTC 1D candles for ATR exhaustion
   const timerRef = useRef(null);
   const firebaseSyncRef = useRef(false); // true = local write in-flight, suppress incoming onValue echo
   const remoteUpdateRef = useRef(false); // true = processing remote data, skip trades/watchlist write-backs
@@ -1540,38 +1775,6 @@ export default function App() {
     setRefreshingSymbol(null);
   };
 
-  const fetchTokenNews = async (symbol, name) => {
-    setTokenNews(prev => ({ ...prev, [symbol]: { ...(prev[symbol] || {}), fetching: true } }));
-    const ticker = symbol.replace("USDT", "").toLowerCase();
-    const nameQ  = name.toLowerCase();
-    try {
-      const res  = await fetch("https://min-api.cryptocompare.com/data/v2/news/?lang=EN&sortOrder=latest&limit=50");
-      const data = await res.json();
-      const articles = (data?.Data || []).filter(a => {
-        const text = `${a.title || ""} ${a.categories || ""} ${a.body || ""}`.toLowerCase();
-        return text.includes(ticker) || text.includes(nameQ);
-      });
-      setTokenNews(prev => ({ ...prev, [symbol]: { articles, fetching: false, loaded: true } }));
-    } catch {
-      setTokenNews(prev => ({ ...prev, [symbol]: { articles: [], fetching: false, loaded: true } }));
-    }
-  };
-
-  const toggleTokenNews = (e, symbol, name) => {
-    e.stopPropagation();
-    setNewsOpen(prev => {
-      const next = new Set(prev);
-      if (next.has(symbol)) {
-        next.delete(symbol);
-      } else {
-        next.add(symbol);
-        if (!tokenNews[symbol]?.loaded && !tokenNews[symbol]?.fetching) {
-          fetchTokenNews(symbol, name);
-        }
-      }
-      return next;
-    });
-  };
 
   const runQuickAnalyze = async () => {
     const raw = quickQuery.trim().toUpperCase().replace(/\s/g, "");
@@ -1585,7 +1788,7 @@ export default function App() {
       return;
     }
     const rawData  = { ...candles, symbol, name, role: "alt", narrative: [] };
-    const analysis = scoreToken(rawData, btcData);
+    const analysis = scoreToken(rawData, btcData, btcDaily);
     setQuickResult({ symbol, name, analysis, candles1h: candles.candles1h, status: "done" });
   };
 
@@ -1617,10 +1820,13 @@ export default function App() {
         rsi1h: btcAnalysis.rsi1h ? +btcAnalysis.rsi1h.toFixed(1) : null,
       } : null,
       correlatedSelloff: hasCorrelatedSelloff,
+      atrExhaustion: btcAnalysis?.atrExhaustion ? { exhaustionPct: +btcAnalysis.atrExhaustion.exhaustionPct.toFixed(1), label: btcAnalysis.atrExhaustion.label } : null,
+      usTransition: btcAnalysis?.usTransition ? { phase: btcAnalysis.usTransition.phase, minsToUS: btcAnalysis.usTransition.minsToUS, isHardBlock: btcAnalysis.usTransition.isHardBlock } : null,
+      sessionPhase: btcAnalysis?.btcPhase ? { phase: btcAnalysis.btcPhase.label, score: btcAnalysis.btcPhase.score } : null,
       tokens: tokens.map(t => buildExportPayload(t.symbol, t.name, t.narrative, t.analysis, btcAnalysis)),
     };
     // Remove redundant btc/session/scanTime from individual tokens since they're at top level
-    payload.tokens.forEach(t => { delete t._instruction; delete t.scanTime; delete t.session; delete t.btc; });
+    payload.tokens.forEach(t => { delete t._instruction; delete t.scanTime; delete t.session; delete t.btc; delete t.atrExhaustion; delete t.usTransition; delete t.sessionPhase; });
     navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
     setCopied("__multi__");
     setTimeout(() => setCopied(null), 2000);
@@ -1651,6 +1857,12 @@ export default function App() {
       setProgress(Math.round(((idx + 1) / total) * 100));
       if (idx < total - 1) await new Promise(r => setTimeout(r, 100));
     }
+    // Fetch BTC daily candles for ATR exhaustion filter
+    try {
+      const resBtcDaily = await fetch("https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=15");
+      if (resBtcDaily.ok) setBtcDaily(await resBtcDaily.json());
+    } catch (e) { console.warn("Failed BTC daily fetch", e); }
+
     setData(results);
     setLastUpdate(new Date());
     setLoading(false);
@@ -1667,8 +1879,15 @@ export default function App() {
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [autoRefresh, fetchData]);
 
+  // Scroll-to-top visibility
+  useEffect(() => {
+    const handleScroll = () => setShowScrollTop(window.scrollY > 300);
+    window.addEventListener("scroll", handleScroll);
+    return () => window.removeEventListener("scroll", handleScroll);
+  }, []);
+
   const btcData = data["BTCUSDT"] || null;
-  const btcAnalysis = btcData ? scoreToken(btcData, btcData) : null;
+  const btcAnalysis = btcData ? scoreToken(btcData, btcData, btcDaily) : null;
 
   // BTC 1H crash detection: compare last 2 candles on 1H
   const btcChange1h = useMemo(() => {
@@ -1684,7 +1903,7 @@ export default function App() {
     const initial = tokens.filter(t => t.role === "alt").map(t => {
       const d = data[t.symbol];
       if (!d) return { ...t, analysis: null };
-      return { ...t, analysis: scoreToken(d, btcData) };
+      return { ...t, analysis: scoreToken(d, btcData, btcDaily) };
     }).filter(t => t.analysis);
 
     // ── CROSS-TOKEN CORRELATION DETECTION (Fix #9) ──
@@ -1736,7 +1955,7 @@ export default function App() {
       if (!isLaggard && !modified) return t;
       return { ...t, analysis };
     });
-  }, [data, tokens, btcData]);
+  }, [data, tokens, btcData, btcDaily]);
 
   const sorted = useMemo(() =>
     [...altResults].sort((a, b) => {
@@ -1912,6 +2131,45 @@ export default function App() {
           </div>
         )}
 
+        {/* ── Session Transition Context ── */}
+        {btcAnalysis && (btcAnalysis.atrExhaustion || btcAnalysis.usTransition || btcAnalysis.btcPhase) && (
+          <div className="card" style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10, padding: "8px 10px" }}>
+            {btcAnalysis.atrExhaustion && (
+              <div style={{
+                padding: "4px 10px", borderRadius: 6, fontSize: 10, fontWeight: 700,
+                background: `${btcAnalysis.atrExhaustion.color}15`,
+                border: `1px solid ${btcAnalysis.atrExhaustion.color}40`,
+                color: btcAnalysis.atrExhaustion.color,
+                fontFamily: "var(--mono)",
+              }}>
+                ATR {btcAnalysis.atrExhaustion.label} {btcAnalysis.atrExhaustion.exhaustionPct.toFixed(0)}%
+              </div>
+            )}
+            {btcAnalysis.usTransition && btcAnalysis.usTransition.phase !== "CLEAR" && (
+              <div style={{
+                padding: "4px 10px", borderRadius: 6, fontSize: 10, fontWeight: 700,
+                background: `${btcAnalysis.usTransition.color}15`,
+                border: `1px solid ${btcAnalysis.usTransition.color}40`,
+                color: btcAnalysis.usTransition.color,
+                fontFamily: "var(--mono)",
+              }}>
+                US {btcAnalysis.usTransition.phase.replace("_", " ")}
+                {btcAnalysis.usTransition.minsToUS > 0 ? ` ${btcAnalysis.usTransition.minsToUS}m` : ""}
+              </div>
+            )}
+            {btcAnalysis.btcPhase && btcAnalysis.btcPhase.label !== "NEUTRAL" && (
+              <div style={{
+                padding: "4px 10px", borderRadius: 6, fontSize: 10, fontWeight: 700,
+                background: `${btcAnalysis.btcPhase.color}15`,
+                border: `1px solid ${btcAnalysis.btcPhase.color}40`,
+                color: btcAnalysis.btcPhase.color,
+              }}>
+                {btcAnalysis.btcPhase.label.replace(/_/g, " ")}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* ── Narrative Trends (Binance-wide) ── */}
         {narrativeHeat.length > 0 && (
           <div className="card" style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10, padding: "0 2px" }}>
@@ -1990,6 +2248,25 @@ export default function App() {
                 {sessionInfo.hoursToNext > 0 ? `${sessionInfo.hoursToNext}h ` : ""}{sessionInfo.minsRemaining}min
               </span>
               {". Asian session stops may be swept before the real move. Use wider stops or wait for the liquidity grab candle to close before entering."}
+            </div>
+          </div>
+        )}
+
+        {/* ── US Transition Warning ── */}
+        {!loading && btcAnalysis?.usTransition && (btcAnalysis.usTransition.isHardBlock || btcAnalysis.usTransition.isConfidenceDowngrade) && (
+          <div className="card" style={{
+            background: "#12121e",
+            border: `1px solid ${btcAnalysis.usTransition.color}50`,
+            borderRadius: 12, padding: 12, marginBottom: 10,
+          }}>
+            <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.5, marginBottom: 5, color: btcAnalysis.usTransition.color }}>
+              {btcAnalysis.usTransition.isHardBlock ? "⛔ PRE-US DANGER ZONE — NO NEW ENTRIES" : "⚠ US SESSION IMMINENT"}
+            </div>
+            <div style={{ fontSize: 11, color: "#94a3b8", lineHeight: 1.6 }}>
+              {btcAnalysis.usTransition.isHardBlock
+                ? "US session transition active. Distribution risk too high for new entries. If in a trade, move stop to breakeven."
+                : `US session opens in ${btcAnalysis.usTransition.minsToUS}min. New entries require HIGH confidence setup. If entering, TP1 must hit before 13:00 UTC or move stop to breakeven.`
+              }
             </div>
           </div>
         )}
@@ -2106,12 +2383,6 @@ export default function App() {
                           borderRadius: 6, padding: "2px 7px", fontSize: 12, fontWeight: 900, fontFamily: "var(--mono)",
                         }}>{analysis.score}</div>
                         <button onClick={() => setQuickResult(null)} style={{ background: "none", border: "none", color: "#6b7280", cursor: "pointer", fontSize: 13, lineHeight: 1, padding: 0 }}>✕</button>
-                        <button onClick={e => toggleTokenNews(e, symbol, name)} style={{
-                          background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 12, lineHeight: 1,
-                          color: newsOpen.has(symbol) ? "#818cf8" : tokenNews[symbol]?.fetching ? "#eab308" : "#374151",
-                        }}>
-                          {tokenNews[symbol]?.fetching ? <span className="spin" style={{ display: "inline-block", fontSize: 11 }}>◌</span> : "📰"}
-                        </button>
                       </div>
                     </div>
                   </div>
@@ -2201,39 +2472,6 @@ export default function App() {
                           R:R ≈ <span style={{ color: "#4ade80" }}>{analysis.rrRatio.toFixed(1)}:1</span>
                           {" · Risk "}<span style={{ color: "#f87171" }}>{analysis.riskPct.toFixed(2)}%</span>
                         </div>
-                      </div>
-                    )}
-
-                    {/* Token News */}
-                    {newsOpen.has(symbol) && (
-                      <div>
-                        <div style={{ fontSize: 9, fontWeight: 800, color: "#6b7280", letterSpacing: 1.5, marginBottom: 6 }}>
-                          📰 {name} NEWS
-                        </div>
-                        {tokenNews[symbol]?.fetching ? (
-                          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                            {[1, 2].map(i => <div key={i} className="shimmer" style={{ height: 34, borderRadius: 6 }} />)}
-                          </div>
-                        ) : !tokenNews[symbol]?.articles?.length ? (
-                          <div style={{ fontSize: 10, color: "#374151", padding: "8px 0", textAlign: "center" }}>No recent news found for {name}</div>
-                        ) : (
-                          <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 180, overflowY: "auto" }}>
-                            {tokenNews[symbol].articles.slice(0, 5).map((a, i) => (
-                              <a key={i} href={a.url} target="_blank" rel="noopener noreferrer" style={{
-                                display: "block", background: "#1a1a2e", border: "1px solid #2a2a3e",
-                                borderRadius: 6, padding: "6px 8px", textDecoration: "none",
-                              }}>
-                                <div style={{ fontSize: 10, color: "#e2e8f0", lineHeight: 1.4 }}>
-                                  {(a.title || "").slice(0, 90)}{(a.title || "").length > 90 ? "…" : ""}
-                                </div>
-                                <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>
-                                  {a.source_info?.name || a.source || "—"}
-                                  {a.published_on ? ` · ${new Date(a.published_on * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}
-                                </div>
-                              </a>
-                            ))}
-                          </div>
-                        )}
                       </div>
                     )}
 
@@ -2419,13 +2657,6 @@ export default function App() {
                           fontSize: 13, color: "#6b7280", lineHeight: 1,
                         }}>
                           <div className={refreshingSymbol === symbol ? "spin" : ""}>⟳</div>
-                        </button>
-                        <button onClick={(e) => toggleTokenNews(e, symbol, name)} style={{
-                          background: "none", border: "none", cursor: "pointer", padding: 0,
-                          fontSize: 12, lineHeight: 1,
-                          color: newsOpen.has(symbol) ? "#818cf8" : tokenNews[symbol]?.fetching ? "#eab308" : "#374151",
-                        }}>
-                          {tokenNews[symbol]?.fetching ? <span className="spin" style={{ display: "inline-block", fontSize: 11 }}>◌</span> : "📰"}
                         </button>
                       </div>
                     </div>
@@ -2650,48 +2881,35 @@ export default function App() {
                             </div>
                           </div>
                         )}
+                        {analysis.adjustedTP?.active && (
+                          <div style={{ marginTop: 8, padding: "7px 10px", borderRadius: 7,
+                            background: "rgba(249,115,22,0.08)", border: "1px solid #f9731630" }}>
+                            <div style={{ fontSize: 9, color: "#f97316", fontWeight: 800, letterSpacing: 1, marginBottom: 4 }}>
+                              SESSION-ADJUSTED TP ({analysis.adjustedTP.tier})
+                            </div>
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
+                              {[
+                                ["Entry", fp(analysis.currentPrice), "#f1f5f9"],
+                                [`Stop –${analysis.adjustedTP.stopPct}%`, fp(analysis.adjustedTP.stop), "#f87171"],
+                                [`TP1 +${analysis.adjustedTP.tp1Pct}%`, fp(analysis.adjustedTP.tp1), "#4ade80"],
+                                [`TP2 +${analysis.adjustedTP.tp2Pct}%`, fp(analysis.adjustedTP.tp2), "#22c55e"],
+                              ].map(([label, val, color]) => (
+                                <div key={label}>
+                                  <div style={{ fontSize: 9, color: "#6b7280" }}>{label}</div>
+                                  <div style={{ fontSize: 12, color, fontFamily: "var(--mono)", fontWeight: 700 }}>${val}</div>
+                                </div>
+                              ))}
+                            </div>
+                            <div style={{ fontSize: 9, color: analysis.adjustedTP.valid ? "#f97316" : "#f87171", marginTop: 4 }}>
+                              R:R {analysis.adjustedTP.rr}:1{!analysis.adjustedTP.valid ? " — INVALID (below 1:1)" : ""} · ATR range {analysis.atrExhaustion?.exhaustionPct.toFixed(0)}% consumed
+                            </div>
+                          </div>
+                        )}
                         <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 8, fontFamily: "var(--mono)" }}>
                           Risk: <span style={{ color: "#f87171" }}>{analysis.riskPct.toFixed(2)}%</span>
                           {" · R:R ≈ "}<span style={{ color: "#4ade80" }}>{analysis.rrRatio.toFixed(1)}:1</span>
                           {" · Max hold: "}<span style={{ color: "#fbbf24" }}>48H</span>
                         </div>
-                      </div>
-                    )}
-
-                    {/* Token News Panel (on-demand) */}
-                    {newsOpen.has(symbol) && (
-                      <div style={{ marginTop: 10 }}>
-                        <div style={{ fontSize: 9, fontWeight: 800, color: "#6b7280", letterSpacing: 1.5, marginBottom: 6 }}>
-                          📰 {name.toUpperCase()} NEWS
-                        </div>
-                        {tokenNews[symbol]?.fetching ? (
-                          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                            {[1, 2].map(i => <div key={i} className="shimmer" style={{ height: 34, borderRadius: 6 }} />)}
-                          </div>
-                        ) : !tokenNews[symbol]?.articles?.length ? (
-                          <div style={{ fontSize: 10, color: "#374151", padding: "10px 0", textAlign: "center" }}>
-                            No recent news found for {name}
-                          </div>
-                        ) : (
-                          <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 200, overflowY: "auto" }}>
-                            {tokenNews[symbol].articles.slice(0, 6).map((a, i) => (
-                              <a key={i} href={a.url} target="_blank" rel="noopener noreferrer"
-                                onClick={e => e.stopPropagation()}
-                                style={{
-                                  display: "block", background: "#1a1a2e", border: "1px solid #2a2a3e",
-                                  borderRadius: 6, padding: "6px 8px", textDecoration: "none",
-                                }}>
-                                <div style={{ fontSize: 10, color: "#e2e8f0", lineHeight: 1.4 }}>
-                                  {(a.title || "").slice(0, 90)}{(a.title || "").length > 90 ? "…" : ""}
-                                </div>
-                                <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>
-                                  {a.source_info?.name || a.source || "—"}
-                                  {a.published_on ? ` · ${new Date(a.published_on * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}
-                                </div>
-                              </a>
-                            ))}
-                          </div>
-                        )}
                       </div>
                     )}
 
@@ -2781,6 +2999,21 @@ export default function App() {
             </button>
           </div>
         </div>
+      )}
+
+      {/* Scroll to top */}
+      {showScrollTop && (
+        <button
+          onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+          style={{
+            position: "fixed", bottom: 70, right: 16, zIndex: 200,
+            width: 40, height: 40, borderRadius: "50%",
+            background: "#1e1e2e", border: "1px solid #312e8180",
+            color: "#a5b4fc", fontSize: 18, cursor: "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            boxShadow: "0 2px 12px rgba(0,0,0,0.5)",
+          }}
+        >&#9650;</button>
       )}
 
       {/* Settings */}
