@@ -19,11 +19,6 @@ const NFP_DATES_2026 = [
   "2026-09-04", "2026-10-02", "2026-11-06", "2026-12-04",
 ];
 
-const RISK_KEYWORDS = [
-  "hack", "exploit", "breach", "liquidation", "crash", "ban", "sec", "lawsuit",
-  "bankrupt", "rug", "scam", "fdic", "regulation", "arrest", "fraud", "emergency",
-  "panic", "collapse", "seized", "shut down", "insolvent",
-];
 
 // ─── Helpers ─────────────────────────────────────────────────────
 function todayUTC()    { return new Date().toISOString().slice(0, 10); }
@@ -94,9 +89,7 @@ function FngGauge({ value, label }) {
 export default function ExternalFactorsPanel() {
   const [fng, setFng]           = useState(null);
   const [btcDom, setBtcDom]     = useState(null);
-  const [news, setNews]         = useState([]);
   const [fetching, setFetching] = useState(true);
-  const [lastFetch, setLastFetch] = useState(null);
   const [expandMacro, setExpandMacro] = useState(false);
   const timerRef = useRef(null);
 
@@ -107,11 +100,6 @@ export default function ExternalFactorsPanel() {
   // Calendar outdated check — shown when current year > CALENDAR_YEAR
   const calendarOutdated = new Date().getFullYear() > CALENDAR_YEAR;
 
-  const riskArticles = news.filter(a => {
-    const text = ((a.title || "") + " " + (a.body || "")).toLowerCase();
-    return RISK_KEYWORDS.some(kw => text.includes(kw));
-  });
-
   // ── Verdict — playbook Section 2 order matters, do not reorder ──
   const todayEvent    = macroEvents.find(e => e.date === today);
   const tomorrowEvent = macroEvents.find(e => e.date === tomorrow);
@@ -120,8 +108,6 @@ export default function ExternalFactorsPanel() {
       ? { label: "NO TRADE",      icon: "🚫", color: "#ef4444", bg: "rgba(127,29,29,0.35)",  border: "#ef444448", reason: `${todayEvent.type} today — 12H blackout window active` }
     : tomorrowEvent
       ? { label: "CAUTION",       icon: "⚡", color: "#eab308", bg: "rgba(113,63,18,0.35)",  border: "#eab30848", reason: `${tomorrowEvent.type} tomorrow — reduce to 50% position size` }
-    : riskArticles.length >= 3
-      ? { label: "HIGH RISK",     icon: "⚠",  color: "#f97316", bg: "rgba(124,45,18,0.35)",  border: "#f9731648", reason: `${riskArticles.length} high-risk headlines active — verify before entering` }
     : fng?.value <= 20
       ? { label: "EXTREME FEAR",  icon: "😱", color: "#eab308", bg: "rgba(113,63,18,0.3)",   border: "#eab30848", reason: "F&G ≤ 20 — raise confirmation bar before entry" }
     : fng?.value >= 85
@@ -131,10 +117,9 @@ export default function ExternalFactorsPanel() {
   // ── Data Fetch ────────────────────────────────────────────────────
   const fetchAll = useCallback(async () => {
     setFetching(true);
-    const [fngRes, globalRes, newsRes] = await Promise.allSettled([
+    const [fngRes, globalRes] = await Promise.allSettled([
       fetch("https://api.alternative.me/fng/?limit=3").then(r => r.json()),
       fetch("https://api.coingecko.com/api/v3/global").then(r => r.json()),
-      fetch("https://min-api.cryptocompare.com/data/v2/news/?lang=EN&sortOrder=latest&limit=30").then(r => r.json()),
     ]);
 
     if (fngRes.status === "fulfilled") {
@@ -145,13 +130,7 @@ export default function ExternalFactorsPanel() {
       const dom = globalRes.value?.data?.market_cap_percentage?.btc;
       if (dom !== undefined) setBtcDom(parseFloat(dom.toFixed(1)));
     }
-    if (newsRes.status === "fulfilled") {
-      const articles = newsRes.value?.Data;
-      if (Array.isArray(articles)) setNews(articles);
-    }
-
     setFetching(false);
-    setLastFetch(new Date());
   }, []);
 
   useEffect(() => {
@@ -282,60 +261,6 @@ export default function ExternalFactorsPanel() {
             );
           })}
         </div>
-      </div>
-
-      {/* ── Latest News ── */}
-      <div className="card" style={{
-        background: "#12121e", border: "1px solid #1e1e2e",
-        borderRadius: 12, padding: 10, marginBottom: 8,
-      }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-          <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: 1.5, color: "#6b7280" }}>
-            📰 LATEST NEWS
-            {riskArticles.length > 0 && (
-              <span style={{ marginLeft: 6, color: "#f97316" }}>· {riskArticles.length} risk flagged</span>
-            )}
-          </div>
-          {lastFetch && (
-            <span style={{ fontSize: 9, color: "#374151", fontFamily: "var(--mono)" }}>
-              {lastFetch.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-            </span>
-          )}
-        </div>
-
-        {fetching && news.length === 0 ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            {[1, 2, 3].map(i => <div key={i} className="shimmer" style={{ height: 38, borderRadius: 6 }} />)}
-          </div>
-        ) : news.length === 0 ? (
-          <div style={{ fontSize: 11, color: "#374151", padding: "12px 0", textAlign: "center" }}>
-            No news available
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 180, overflowY: "auto" }}>
-            {news.map((a, i) => {
-              const text = ((a.title || "") + " " + (a.body || "")).toLowerCase();
-              const isRisk = RISK_KEYWORDS.some(kw => text.includes(kw));
-              return (
-                <a key={i} href={a.url} target="_blank" rel="noopener noreferrer" style={{
-                  display: "block",
-                  background: isRisk ? "rgba(127,29,29,0.18)" : "rgba(255,255,255,0.03)",
-                  border: isRisk ? "1px solid #ef444428" : "1px solid #1e1e2e",
-                  borderRadius: 6, padding: "6px 8px", textDecoration: "none",
-                }}>
-                  <div style={{ fontSize: 10, color: isRisk ? "#fca5a5" : "#cbd5e1", lineHeight: 1.45 }}>
-                    {isRisk && <span style={{ color: "#f97316", marginRight: 4 }}>⚠</span>}
-                    {(a.title || "").slice(0, 92)}{(a.title || "").length > 92 ? "…" : ""}
-                  </div>
-                  <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>
-                    {a.source_info?.name || a.source || "—"}
-                    {a.published_on ? ` · ${new Date(a.published_on * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}
-                  </div>
-                </a>
-              );
-            })}
-          </div>
-        )}
       </div>
 
       {/* ── Divider ── */}
