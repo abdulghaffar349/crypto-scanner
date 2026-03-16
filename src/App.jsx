@@ -802,7 +802,6 @@ function scoreToken(data, btcData, btcDailyCandles = null) {
 
   // Signal volume gate: compound check (dip avg + trend rising + median fallback)
   const signalVolumeResult = checkSignalVolumeOk(candles1h, candles1h.length - 1, sessionInfo.session, avgVol20);
-  console.log("signalVolumeResult: ", JSON.stringify(signalVolumeResult))
   const signalCandleVolOk = signalVolumeResult.pass ?? false; // Backward-compatible boolean
 
   // New indicators (ATR already calculated above for candle proportionality)
@@ -856,11 +855,10 @@ function scoreToken(data, btcData, btcDailyCandles = null) {
   // ── ENHANCED BTC REGIME FILTER ──
   // Rolling 12H high-to-low dump detection (3 × 4H candles)
   const btcHighs4h = btcData?.candles4h?.slice(-3).map(c => parseFloat(c[2])) || [];
-  const btcLows4h = btcData?.candles4h?.slice(-3).map(c => parseFloat(c[3])) || [];
   const btcRolling12hHigh = btcHighs4h.length ? Math.max(...btcHighs4h) : btcLast;
-  const btcRolling12hLow = btcLows4h.length ? Math.min(...btcLows4h) : btcLast;
+  // Measure drop from 12H high to CURRENT price (not low) — a pump that dipped intraday isn't a dump
   const btcRolling12hDump = btcRolling12hHigh > 0
-    ? ((btcRolling12hHigh - btcRolling12hLow) / btcRolling12hHigh) * 100 : 0;
+    ? Math.max(0, ((btcRolling12hHigh - btcLast) / btcRolling12hHigh) * 100) : 0;
 
   // BTC EMA distance: check if price broke below all key EMAs recently
   const btcCloses1hForEMA = btcData?.candles1h?.map(c => parseFloat(c[4])) || [];
@@ -1888,16 +1886,7 @@ export default function App() {
 
   const btcData = data["BTCUSDT"] || null;
   const btcAnalysis = btcData ? scoreToken(btcData, btcData, btcDaily) : null;
-
-  // BTC 1H crash detection: compare last 2 candles on 1H
-  const btcChange1h = useMemo(() => {
-    const c = btcData?.candles1h;
-    if (!c || c.length < 2) return 0;
-    const prev = parseFloat(c[c.length - 2][4]);
-    const last = parseFloat(c[c.length - 1][4]);
-    return prev > 0 ? ((last - prev) / prev) * 100 : 0;
-  }, [btcData]);
-
+  
   const altResults = useMemo(() => {
     // First pass: score all tokens
     const initial = tokens.filter(t => t.role === "alt").map(t => {
@@ -2108,9 +2097,9 @@ export default function App() {
                     {btcAnalysis.btcChange4h >= 0 ? "+" : ""}{btcAnalysis.btcChange4h.toFixed(2)}%
                   </span>
                   {" 4H · "}RSI {btcAnalysis.rsi1h?.toFixed(0)} · ${fp(btcAnalysis.currentPrice)}
-                  {btcAnalysis.btcRegime && (
-                    <span style={{ color: btcAnalysis.btcRegime.rolling12hDump > 3 ? "#f87171" : "#6b7280" }}>
-                      {" · 12H: "}{btcAnalysis.btcRegime.rolling12hDump > 3 ? "-" : ""}{btcAnalysis.btcRegime.rolling12hDump.toFixed(1)}%
+                  {btcAnalysis.btcRegime && btcAnalysis.btcRegime.rolling12hDump > 0.5 && (
+                    <span style={{ color: btcAnalysis.btcRegime.rolling12hDump > 3 ? "#f87171" : "#fbbf24" }}>
+                      {" · 12H: -"}{btcAnalysis.btcRegime.rolling12hDump.toFixed(1)}%
                     </span>
                   )}
                   {btcAnalysis.btcCaution && (
