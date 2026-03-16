@@ -1891,7 +1891,7 @@ export default function App() {
                   {" 4H · "}RSI {btcAnalysis.rsi1h?.toFixed(0)} · ${fp(btcAnalysis.currentPrice)}
                   {btcAnalysis.btcRegime && (
                     <span style={{ color: btcAnalysis.btcRegime.rolling12hDump > 3 ? "#f87171" : "#6b7280" }}>
-                      {" · 12H: -"}{btcAnalysis.btcRegime.rolling12hDump.toFixed(1)}%
+                      {" · 12H: "}{btcAnalysis.btcRegime.rolling12hDump > 3 ? "-" : ""}{btcAnalysis.btcRegime.rolling12hDump.toFixed(1)}%
                     </span>
                   )}
                   {btcAnalysis.btcCaution && (
