@@ -2110,7 +2110,7 @@ export default function App() {
                   {" 4H · "}RSI {btcAnalysis.rsi1h?.toFixed(0)} · ${fp(btcAnalysis.currentPrice)}
                   {btcAnalysis.btcRegime && (
                     <span style={{ color: btcAnalysis.btcRegime.rolling12hDump > 3 ? "#f87171" : "#6b7280" }}>
-                      {" · 12H: -"}{btcAnalysis.btcRegime.rolling12hDump.toFixed(1)}%
+                      {" · 12H: "}{btcAnalysis.btcRegime.rolling12hDump > 3 ? "-" : ""}{btcAnalysis.btcRegime.rolling12hDump.toFixed(1)}%
                     </span>
                   )}
                   {btcAnalysis.btcCaution && (
@@ -2355,17 +2355,18 @@ export default function App() {
                   {/* Header */}
                   <div style={{ padding: "10px 14px 0", display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                     <div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                         <span style={{ fontSize: 9, fontWeight: 800, color: "#818cf8", background: "#1e1b4b", border: "1px solid #818cf840", borderRadius: 4, padding: "1px 5px", letterSpacing: 1 }}>⚡ LIVE</span>
                         <span style={{ fontSize: 15, fontWeight: 800 }}>{name}</span>
                         <span style={{ fontSize: 10, color: "#6b7280", fontFamily: "var(--mono)" }}>{symbol}</span>
                         <span style={{ fontSize: 9, fontWeight: 700, color: "#f97316", background: "rgba(124,45,18,0.3)", border: "1px solid #f9731630", borderRadius: 4, padding: "1px 5px" }}>NOT SAVED</span>
+                        {hasSetup && <span style={{ background: "#166534", color: "#4ade80", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 800, letterSpacing: 1 }}>SETUP</span>}
                       </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
                         <span style={{ fontSize: 11, color: analysis.setupType !== "None" ? "#fbbf24" : "#4b5563", fontWeight: 600 }}>{analysis.setupType}</span>
                         {analysis.setupStatus === "CONFIRMED" && <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1, padding: "2px 5px", borderRadius: 3, background: "#16653440", color: "#4ade80", border: "1px solid #16653460" }}>CONFIRMED</span>}
                         {analysis.setupStatus === "FORMING"   && <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1, padding: "2px 5px", borderRadius: 3, background: "#854d0e30", color: "#fbbf24", border: "1px solid #854d0e50" }}>FORMING</span>}
-                        {hasSetup && <span style={{ background: "#166534", color: "#4ade80", padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 800, letterSpacing: 1 }}>SETUP</span>}
+                        {analysis.setupStatus === "REJECTED" && <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1, padding: "2px 5px", borderRadius: 3, background: "#7f1d1d30", color: "#f87171", border: "1px solid #7f1d1d50" }}>REJECTED</span>}
                       </div>
                     </div>
                     <div style={{ display: "flex", alignItems: "flex-start", gap: 8, flexShrink: 0 }}>
@@ -2395,9 +2396,13 @@ export default function App() {
                     </div>
                     <div>
                       <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1.2, marginBottom: 3 }}>VOLUME</div>
-                      <span style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: analysis.volRatio >= 1.5 ? "#4ade80" : analysis.volRatio >= 0.8 ? "#fbbf24" : "#f87171" }}>
-                        {analysis.volRatio.toFixed(2)}x
-                      </span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <span style={{
+                          fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700,
+                          color: analysis.sessionVolume?.grade === "CLIMAX" ? "#22c55e" : analysis.sessionVolume?.grade === "STRONG" ? "#4ade80" : analysis.sessionVolume?.grade === "ADEQUATE" ? "#fbbf24" : "#f87171",
+                        }}>{analysis.sessionVolume ? analysis.sessionVolume.adjusted.toFixed(2) : analysis.volRatio.toFixed(2)}x</span>
+                        <span style={{ fontSize: 8, color: "#6b7280", fontWeight: 600 }}>{analysis.sessionVolume?.grade || ""}</span>
+                      </div>
                     </div>
                     <div>
                       <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: 1.2, marginBottom: 3 }}>BTC</div>
