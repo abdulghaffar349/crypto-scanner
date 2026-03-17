@@ -771,6 +771,9 @@ function scoreToken(data, btcData, btcDailyCandles = null) {
 
   const rsi1h = calcRSI(closes1h);
   const rsi4h = calcRSI(closes4h);
+  // RSI bridge: compute RSI at prior candle positions to detect zone transition
+  const rsiPrior1 = closes1h.length > 15 ? calcRSI(closes1h.slice(0, -1)) : null;
+  const rsiPrior2 = closes1h.length > 16 ? calcRSI(closes1h.slice(0, -2)) : null;
   const ema200 = calcEMA(closes1h, Math.min(200, closes1h.length - 1));
   const currentEMA200 = ema200[ema200.length - 1];
   const priceVsEMA = ((currentPrice - currentEMA200) / currentEMA200) * 100;
@@ -803,6 +806,24 @@ function scoreToken(data, btcData, btcDailyCandles = null) {
   // Signal volume gate: compound check (dip avg + trend rising + median fallback)
   const signalVolumeResult = checkSignalVolumeOk(candles1h, candles1h.length - 1, sessionInfo.session, avgVol20);
   const signalCandleVolOk = signalVolumeResult.pass ?? false; // Backward-compatible boolean
+
+  // RSI Bridge: detect when RSI just exited 30-40 zone due to confirmation candle
+  const supportBounce = supports.length > 0
+    ? ((currentPrice - supports[0]) / supports[0]) * 100
+    : Infinity;
+  const signalCandleIsGreen = parseFloat(candles1h[candles1h.length - 1][4]) >= parseFloat(candles1h[candles1h.length - 1][1]);
+  const rsiWasInZone = (rsiPrior1 !== null && rsiPrior1 >= 30 && rsiPrior1 <= 40)
+                    || (rsiPrior2 !== null && rsiPrior2 >= 30 && rsiPrior2 <= 40);
+  const rsiBridge = rsi1h !== null
+    && rsi1h > 40 && rsi1h <= 43
+    && signalVolumeResult.method === "dip_avg_confirmed"
+    && signalVolumeResult.confidence === "HIGH"
+    && rsiWasInZone
+    && signalCandleIsGreen
+    && supportBounce < 1.0;
+  const rsiBridgePriorValue = rsiWasInZone
+    ? (rsiPrior1 !== null && rsiPrior1 >= 30 && rsiPrior1 <= 40 ? rsiPrior1 : rsiPrior2)
+    : null;
 
   // New indicators (ATR already calculated above for candle proportionality)
   const macd = calcMACD(closes1h);
@@ -915,6 +936,7 @@ function scoreToken(data, btcData, btcDailyCandles = null) {
     // ── RSI 1H scoring (weighted per playbook) ──
     if (rsi1h !== null) {
       if (rsi1h >= 30 && rsi1h <= 40)      { score += 25; reasons.push(`RSI 1H in primary zone (${rsi1h.toFixed(1)})`); }
+      else if (rsiBridge)                    { score += 25; reasons.push(`RSI 1H bridge (${rsi1h.toFixed(1)}, was ${rsiBridgePriorValue.toFixed(1)} prior) — vol confirmed while RSI transitioning`); }
       else if (rsi1h > 40 && rsi1h <= 50)   { score += 10; reasons.push(`RSI 1H neutral (${rsi1h.toFixed(1)})`); }
       else if (rsi1h < 30)                   {
         score += 5; // Reduced from +15 — deeply oversold = knife catching risk
@@ -1060,11 +1082,6 @@ function scoreToken(data, btcData, btcDailyCandles = null) {
       const topSignals = [...(btcPhase.signals.distribution || [])].slice(0, 2).join(", ");
       reasons.push(`BTC phase: ${btcPhase.label}${topSignals ? ` — ${topSignals}` : ""}`);
     }
-    if (adjustedTP && !adjustedTP.valid && adjustedTP.active && setupType !== "None") {
-      score -= 15;
-      reasons.push(`Adjusted R:R < 1:1 (${adjustedTP.rr}:1 at ${adjustedTP.tier} tier) — trade invalid after session adjustment`);
-    }
-
     // ── Asian Range Breakdown ──
     // If price has crashed through the entire Asian range, the "dip recovery at London open" thesis failed
     asianRangeBreakdown = asianRange && currentPrice < asianRange.low;
@@ -1135,15 +1152,18 @@ function scoreToken(data, btcData, btcDailyCandles = null) {
   // ── SETUP CLASSIFICATION (enhanced with forming/confirmed status) ──
   // Check individual criteria for Setup A
   const setupACriteria = {
-    rsiInZone: rsi1h !== null && rsi1h >= 30 && rsi1h <= 40,
+    rsiInZone: (rsi1h !== null && rsi1h >= 30 && rsi1h <= 40) || rsiBridge,
     atSupport: nearSupport,
     candleConfirmed: confirmationStrength === "HIGH" && bullish,
     volumeOk: sessionVolume.adjusted >= 0.8,  // session-adjusted
     signalVolumeOk: signalCandleVolOk,
+    btcStable: btcSafe,
+  };
+  // Informational fields (not boolean gates — kept separate to avoid inflating setupAMet/setupATotal)
+  const setupAInfo = {
     signalVolumeMethod: signalVolumeResult.method,
     signalVolumeConfidence: signalVolumeResult.confidence,
     signalVolumeNote: signalVolumeResult.note,
-    btcStable: btcSafe,
   };
   const setupAMet = Object.values(setupACriteria).filter(Boolean).length;
   const setupATotal = Object.keys(setupACriteria).length;
@@ -1169,6 +1189,12 @@ function scoreToken(data, btcData, btcDailyCandles = null) {
   } else if (rsi1h < 60 && change24h < 2 && btcSafe && score >= 40) {
     setupType = "C: Momentum Candidate";
     setupStatus = "FORMING";
+  }
+
+  // ── Adjusted TP R:R check (after setup classification so setupType is set) ──
+  if (adjustedTP && !adjustedTP.valid && adjustedTP.active && setupType !== "None") {
+    score -= 15;
+    reasons.push(`Adjusted R:R < 1:1 (${adjustedTP.rr}:1 at ${adjustedTP.tier} tier) — trade invalid after session adjustment`);
   }
 
   // ── R:R Check (hard penalty if playbook R:R < 2.0) ──
@@ -1219,7 +1245,7 @@ function scoreToken(data, btcData, btcDailyCandles = null) {
     activeNarrative:     { pass: hasActiveNarrative, value: hasActiveNarrative ? (data.narrative || []).join(", ") : "None tagged" },
     volumeAboveAvg:      { pass: sessionVolume.adjusted >= 0.8, value: `${sessionVolume.grade} (${volRatio.toFixed(2)}x raw → ${sessionVolume.adjusted.toFixed(2)}x adjusted)` },
     noMajorEvents:       { pass: !sessionInfo.inDangerWindow, value: sessionInfo.inDangerWindow ? `${sessionInfo.nextSession} open in ${sessionInfo.minsToNext}min` : "No events detected" },
-    rsiInZone:           { pass: rsi1h !== null && rsi1h >= 30 && rsi1h <= 40, value: rsi1h !== null ? `RSI ${rsi1h.toFixed(1)}` : "N/A" },
+    rsiInZone:           { pass: (rsi1h !== null && rsi1h >= 30 && rsi1h <= 40) || rsiBridge, value: rsi1h !== null ? rsiBridge ? `RSI ${rsi1h.toFixed(1)} (bridge: was ${rsiBridgePriorValue.toFixed(1)})` : `RSI ${rsi1h.toFixed(1)}` : "N/A" },
     candleConfirmation:  { pass: confirmationStrength === "HIGH" && bullish && proportional, value: confirmationStrength === "HIGH" && proportional ? `${pattern} (confirmed, proportional)` : confirmationStrength === "HIGH" ? `${pattern} (confirmed but disproportionate)` : `${pattern} (${confirmationStrength.toLowerCase()})` },
     atrNotExhausted:     { pass: !atrExhaustion || atrExhaustion.exhaustionPct < 60, value: atrExhaustion ? `${atrExhaustion.label} (${atrExhaustion.exhaustionPct.toFixed(0)}% of daily ATR)` : "No BTC daily data" },
   };
@@ -1241,11 +1267,13 @@ function scoreToken(data, btcData, btcDailyCandles = null) {
     entry: setupStatus === "CONFIRMED" || (setupStatus === "FORMING" && setupType !== "None"),
     hardReject, catchingKnifeRisk,
     // Setup A details
-    setupACriteria, setupAMet, setupATotal, setupAMissing,
+    setupACriteria, setupAInfo, setupAMet, setupATotal, setupAMissing,
     // Session-adjusted volume
     sessionVolume,
     // Signal volume gate details (new)
     signalVolumeResult,
+    // RSI bridge
+    rsiBridge, rsiBridgePriorValue,
     // Volume polarity
     volumePolarity, volumePolarityBearish, sellVolumeCandles, buyVolumeCandles,
     // Volatility regime
@@ -1400,6 +1428,7 @@ function buildExportPayload(symbol, name, narrative, analysis, btcAnalysis) {
       reasons: a.reasons,
       // Setup A breakdown
       setupACriteria: a.setupACriteria || null,
+      setupAInfo: a.setupAInfo || null,
       setupAMet: a.setupAMet || 0,
       setupATotal: a.setupATotal || 0,
       setupAMissing: a.setupAMissing || [],
@@ -1885,8 +1914,18 @@ export default function App() {
   }, []);
 
   const btcData = data["BTCUSDT"] || null;
-  const btcAnalysis = btcData ? scoreToken(btcData, btcData, btcDaily) : null;
-  
+  const btcAnalysis = useMemo(() => btcData ? scoreToken(btcData, btcData, btcDaily) : null, [btcData, btcDaily]);
+
+  // BTC 1H crash detection: compare last 2 candles on 1H
+  const btcChange1h = useMemo(() => {
+    const c = btcData?.candles1h;
+    if (!c || c.length < 2) return 0;
+    const prev = parseFloat(c[c.length - 2][4]);
+    const last = parseFloat(c[c.length - 1][4]);
+    return prev > 0 ? ((last - prev) / prev) * 100 : 0;
+  }, [btcData]);
+  const btcCrashing = btcChange1h < -2;
+
   const altResults = useMemo(() => {
     // First pass: score all tokens
     const initial = tokens.filter(t => t.role === "alt").map(t => {
@@ -2156,6 +2195,25 @@ export default function App() {
                 {btcAnalysis.btcPhase.label.replace(/_/g, " ")}
               </div>
             )}
+          </div>
+        )}
+
+        {/* ── BTC 1H Crash Alert ── */}
+        {btcCrashing && (
+          <div className="card" style={{
+            background: "rgba(239,68,68,0.08)", border: "1px solid #ef444460",
+            borderRadius: 12, padding: "10px 14px", marginBottom: 10,
+            display: "flex", alignItems: "center", gap: 10,
+          }}>
+            <span style={{ fontSize: 18 }}>🚨</span>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 800, color: "#f87171" }}>
+                BTC dropped {btcChange1h.toFixed(1)}% in the last hour
+              </div>
+              <div style={{ fontSize: 11, color: "#fca5a5" }}>
+                Review all positions — stops may be at risk
+              </div>
+            </div>
           </div>
         )}
 
