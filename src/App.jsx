@@ -101,6 +101,27 @@ function calcATR(candles, period = 14) {
   return atr;
 }
 
+function buildSweepEstimate(candles1H) {
+  const atr = calcATR(candles1H);
+  if (!atr) return null;
+  const recent = candles1H.slice(-24);
+  const visibleLow = Math.min(...recent.map(c => parseFloat(c[3])));
+  const shallow      = visibleLow - atr * 0.30;
+  const conservative = visibleLow - atr * 0.50;
+  const deep         = visibleLow - atr * 0.75;
+  const stop         = deep - atr * 0.25;
+  const pct = (base, target) => +((base - target) / base * 100).toFixed(2);
+  return {
+    visibleLow: +visibleLow.toFixed(5),
+    atr1H: +atr.toFixed(5),
+    shallow:      { limitPrice: +shallow.toFixed(5),      multiplier: "0.30×", capTier: "Large-cap (SOL, LINK, AVAX)",     sweepDepthPct: pct(visibleLow, shallow) },
+    conservative: { limitPrice: +conservative.toFixed(5), multiplier: "0.50×", capTier: "Mid-cap (INJ, RENDER, SUI, UNI)", sweepDepthPct: pct(visibleLow, conservative) },
+    deep:         { limitPrice: +deep.toFixed(5),         multiplier: "0.75×", capTier: "Small-cap (FET, ATOM, newer)",    sweepDepthPct: pct(visibleLow, deep) },
+    suggestedStop: +stop.toFixed(5),
+    note: "Select tier based on token market cap. Stop placed below deep sweep regardless of tier.",
+  };
+}
+
 function calcBollingerBands(closes, period = 20, mult = 2) {
   if (closes.length < period) return null;
   const slice = closes.slice(-period);
@@ -1258,6 +1279,8 @@ function scoreToken(data, btcData, btcDailyCandles = null) {
   else if (checklistPassCount >= 5) checklistVerdict = `FORMING — ${checklistTotal - checklistPassCount} check(s) failing`;
   else checklistVerdict = "WAIT — too many checks failing";
 
+  const sweepEstimate = buildSweepEstimate(candles1h);
+
   return {
     rsi1h, rsi4h, currentPrice, ema200: currentEMA200, priceVsEMA,
     volRatio, pattern, bullish, confirmationStrength, proportional, supports, resistances, nearSupport, supportValidated,
@@ -1287,6 +1310,8 @@ function scoreToken(data, btcData, btcDailyCandles = null) {
     sessionInfo, asianRange, asianRangeBreakdown, liquiditySweep, sessionAdjustedStop,
     // Session transition protection
     atrExhaustion, usTransition, btcPhase, adjustedTP,
+    // Sweep entry estimate
+    sweepEstimate,
   };
 }
 
@@ -1464,6 +1489,15 @@ function buildExportPayload(symbol, name, narrative, analysis, btcAnalysis) {
         regime: a.adjustedTP.regime,
       } : null,
     },
+    sweepEstimate: a.sweepEstimate ? {
+      visibleLow: a.sweepEstimate.visibleLow,
+      atr1H: a.sweepEstimate.atr1H,
+      shallow: a.sweepEstimate.shallow,
+      conservative: a.sweepEstimate.conservative,
+      deep: a.sweepEstimate.deep,
+      suggestedStop: a.sweepEstimate.suggestedStop,
+      note: a.sweepEstimate.note,
+    } : null,
   };
 }
 
@@ -2955,6 +2989,49 @@ export default function App() {
                             <div style={{ fontSize: 9, color: analysis.adjustedTP.valid ? "#f97316" : "#f87171", marginTop: 4 }}>
                               R:R {analysis.adjustedTP.rr}:1{!analysis.adjustedTP.valid ? " — INVALID (below 1:1)" : ""} · ATR range {analysis.atrExhaustion?.exhaustionPct.toFixed(0)}% consumed
                             </div>
+                          </div>
+                        )}
+                        {analysis.sweepEstimate && (
+                          <div style={{ marginTop: 12, padding: "8px 10px", borderRadius: 7,
+                            background: "rgba(148,163,184,0.05)", border: "1px solid #1e293b" }}>
+                            <div style={{ fontSize: 9, fontWeight: 700, color: "#94a3b8", letterSpacing: "0.08em", marginBottom: 6 }}>
+                              SWEEP ESTIMATE
+                              <span style={{ fontWeight: 400, color: "#64748b", marginLeft: 8 }}>
+                                Low ${fp(analysis.sweepEstimate.visibleLow)} · ATR ${fp(analysis.sweepEstimate.atr1H)}
+                              </span>
+                            </div>
+                            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                              <thead>
+                                <tr style={{ color: "#64748b" }}>
+                                  <th style={{ textAlign: "left", padding: "2px 4px", fontWeight: 600 }}>Tier</th>
+                                  <th style={{ textAlign: "right", padding: "2px 4px", fontWeight: 600 }}>Limit</th>
+                                  <th style={{ textAlign: "right", padding: "2px 4px", fontWeight: 600 }}>Depth</th>
+                                  <th style={{ textAlign: "left", padding: "2px 4px", fontWeight: 600, fontSize: 10 }}>For</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {[
+                                  { key: "shallow",      label: "Shallow", color: "#94a3b8" },
+                                  { key: "conservative", label: "Mid",     color: "#f1f5f9" },
+                                  { key: "deep",         label: "Deep",    color: "#94a3b8" },
+                                ].map(({ key, label, color }) => {
+                                  const tier = analysis.sweepEstimate[key];
+                                  return (
+                                    <tr key={key}>
+                                      <td style={{ padding: "3px 4px", color }}>{label}</td>
+                                      <td style={{ padding: "3px 4px", textAlign: "right", color: "#f1f5f9", fontFamily: "var(--mono)" }}>${fp(tier.limitPrice)}</td>
+                                      <td style={{ padding: "3px 4px", textAlign: "right", color: "#64748b" }}>{tier.sweepDepthPct}%</td>
+                                      <td style={{ padding: "3px 4px", color: "#64748b", fontSize: 10 }}>{tier.capTier}</td>
+                                    </tr>
+                                  );
+                                })}
+                                <tr style={{ borderTop: "1px solid #1e293b" }}>
+                                  <td style={{ padding: "3px 4px", color: "#f87171", fontSize: 10 }}>Stop</td>
+                                  <td style={{ padding: "3px 4px", textAlign: "right", color: "#f87171", fontFamily: "var(--mono)" }}>${fp(analysis.sweepEstimate.suggestedStop)}</td>
+                                  <td colSpan={2} style={{ padding: "3px 4px", color: "#64748b", fontSize: 10 }}>Below all tiers</td>
+                                </tr>
+                              </tbody>
+                            </table>
                           </div>
                         )}
                         <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 8, fontFamily: "var(--mono)" }}>
