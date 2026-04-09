@@ -2561,6 +2561,51 @@ export default function App() {
                       </div>
                     )}
 
+                    {/* Sweep Entry Estimate — always visible */}
+                    {analysis.sweepEstimate && (
+                      <div style={{ padding: "8px 10px", borderRadius: 7,
+                        background: "rgba(148,163,184,0.05)", border: "1px solid #1e293b" }}>
+                        <div style={{ fontSize: 9, fontWeight: 700, color: "#94a3b8", letterSpacing: "0.08em", marginBottom: 6 }}>
+                          SWEEP ESTIMATE
+                          <span style={{ fontWeight: 400, color: "#64748b", marginLeft: 8 }}>
+                            Low ${fp(analysis.sweepEstimate.visibleLow)} · ATR ${fp(analysis.sweepEstimate.atr1H)}
+                          </span>
+                        </div>
+                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                          <thead>
+                            <tr style={{ color: "#64748b" }}>
+                              <th style={{ textAlign: "left", padding: "2px 4px", fontWeight: 600 }}>Tier</th>
+                              <th style={{ textAlign: "right", padding: "2px 4px", fontWeight: 600 }}>Limit</th>
+                              <th style={{ textAlign: "right", padding: "2px 4px", fontWeight: 600 }}>Depth</th>
+                              <th style={{ textAlign: "left", padding: "2px 4px", fontWeight: 600, fontSize: 10 }}>For</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {[
+                              { key: "shallow",      label: "Shallow", color: "#94a3b8" },
+                              { key: "conservative", label: "Mid",     color: "#f1f5f9" },
+                              { key: "deep",         label: "Deep",    color: "#94a3b8" },
+                            ].map(({ key, label, color }) => {
+                              const tier = analysis.sweepEstimate[key];
+                              return (
+                                <tr key={key}>
+                                  <td style={{ padding: "3px 4px", color }}>{label}</td>
+                                  <td style={{ padding: "3px 4px", textAlign: "right", color: "#f1f5f9", fontFamily: "var(--mono)" }}>${fp(tier.limitPrice)}</td>
+                                  <td style={{ padding: "3px 4px", textAlign: "right", color: "#64748b" }}>{tier.sweepDepthPct}%</td>
+                                  <td style={{ padding: "3px 4px", color: "#64748b", fontSize: 10 }}>{tier.capTier}</td>
+                                </tr>
+                              );
+                            })}
+                            <tr style={{ borderTop: "1px solid #1e293b" }}>
+                              <td style={{ padding: "3px 4px", color: "#f87171", fontSize: 10 }}>Stop</td>
+                              <td style={{ padding: "3px 4px", textAlign: "right", color: "#f87171", fontFamily: "var(--mono)" }}>${fp(analysis.sweepEstimate.suggestedStop)}</td>
+                              <td colSpan={2} style={{ padding: "3px 4px", color: "#64748b", fontSize: 10 }}>Below all tiers</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+
                     {/* Unlock reminder */}
                     <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", borderRadius: 8, background: "#12121e", border: "1px solid #1e1e2e" }}>
                       <span style={{ fontSize: 13 }}>🔒</span>
@@ -2991,54 +3036,56 @@ export default function App() {
                             </div>
                           </div>
                         )}
-                        {analysis.sweepEstimate && (
-                          <div style={{ marginTop: 12, padding: "8px 10px", borderRadius: 7,
-                            background: "rgba(148,163,184,0.05)", border: "1px solid #1e293b" }}>
-                            <div style={{ fontSize: 9, fontWeight: 700, color: "#94a3b8", letterSpacing: "0.08em", marginBottom: 6 }}>
-                              SWEEP ESTIMATE
-                              <span style={{ fontWeight: 400, color: "#64748b", marginLeft: 8 }}>
-                                Low ${fp(analysis.sweepEstimate.visibleLow)} · ATR ${fp(analysis.sweepEstimate.atr1H)}
-                              </span>
-                            </div>
-                            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
-                              <thead>
-                                <tr style={{ color: "#64748b" }}>
-                                  <th style={{ textAlign: "left", padding: "2px 4px", fontWeight: 600 }}>Tier</th>
-                                  <th style={{ textAlign: "right", padding: "2px 4px", fontWeight: 600 }}>Limit</th>
-                                  <th style={{ textAlign: "right", padding: "2px 4px", fontWeight: 600 }}>Depth</th>
-                                  <th style={{ textAlign: "left", padding: "2px 4px", fontWeight: 600, fontSize: 10 }}>For</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {[
-                                  { key: "shallow",      label: "Shallow", color: "#94a3b8" },
-                                  { key: "conservative", label: "Mid",     color: "#f1f5f9" },
-                                  { key: "deep",         label: "Deep",    color: "#94a3b8" },
-                                ].map(({ key, label, color }) => {
-                                  const tier = analysis.sweepEstimate[key];
-                                  return (
-                                    <tr key={key}>
-                                      <td style={{ padding: "3px 4px", color }}>{label}</td>
-                                      <td style={{ padding: "3px 4px", textAlign: "right", color: "#f1f5f9", fontFamily: "var(--mono)" }}>${fp(tier.limitPrice)}</td>
-                                      <td style={{ padding: "3px 4px", textAlign: "right", color: "#64748b" }}>{tier.sweepDepthPct}%</td>
-                                      <td style={{ padding: "3px 4px", color: "#64748b", fontSize: 10 }}>{tier.capTier}</td>
-                                    </tr>
-                                  );
-                                })}
-                                <tr style={{ borderTop: "1px solid #1e293b" }}>
-                                  <td style={{ padding: "3px 4px", color: "#f87171", fontSize: 10 }}>Stop</td>
-                                  <td style={{ padding: "3px 4px", textAlign: "right", color: "#f87171", fontFamily: "var(--mono)" }}>${fp(analysis.sweepEstimate.suggestedStop)}</td>
-                                  <td colSpan={2} style={{ padding: "3px 4px", color: "#64748b", fontSize: 10 }}>Below all tiers</td>
-                                </tr>
-                              </tbody>
-                            </table>
-                          </div>
-                        )}
                         <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 8, fontFamily: "var(--mono)" }}>
                           Risk: <span style={{ color: "#f87171" }}>{analysis.riskPct.toFixed(2)}%</span>
                           {" · R:R ≈ "}<span style={{ color: "#4ade80" }}>{analysis.rrRatio.toFixed(1)}:1</span>
                           {" · Max hold: "}<span style={{ color: "#fbbf24" }}>48H</span>
                         </div>
+                      </div>
+                    )}
+
+                    {/* Sweep Entry Estimate — always visible */}
+                    {analysis.sweepEstimate && (
+                      <div style={{ padding: "8px 10px", borderRadius: 7,
+                        background: "rgba(148,163,184,0.05)", border: "1px solid #1e293b" }}>
+                        <div style={{ fontSize: 9, fontWeight: 700, color: "#94a3b8", letterSpacing: "0.08em", marginBottom: 6 }}>
+                          SWEEP ESTIMATE
+                          <span style={{ fontWeight: 400, color: "#64748b", marginLeft: 8 }}>
+                            Low ${fp(analysis.sweepEstimate.visibleLow)} · ATR ${fp(analysis.sweepEstimate.atr1H)}
+                          </span>
+                        </div>
+                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                          <thead>
+                            <tr style={{ color: "#64748b" }}>
+                              <th style={{ textAlign: "left", padding: "2px 4px", fontWeight: 600 }}>Tier</th>
+                              <th style={{ textAlign: "right", padding: "2px 4px", fontWeight: 600 }}>Limit</th>
+                              <th style={{ textAlign: "right", padding: "2px 4px", fontWeight: 600 }}>Depth</th>
+                              <th style={{ textAlign: "left", padding: "2px 4px", fontWeight: 600, fontSize: 10 }}>For</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {[
+                              { key: "shallow",      label: "Shallow", color: "#94a3b8" },
+                              { key: "conservative", label: "Mid",     color: "#f1f5f9" },
+                              { key: "deep",         label: "Deep",    color: "#94a3b8" },
+                            ].map(({ key, label, color }) => {
+                              const tier = analysis.sweepEstimate[key];
+                              return (
+                                <tr key={key}>
+                                  <td style={{ padding: "3px 4px", color }}>{label}</td>
+                                  <td style={{ padding: "3px 4px", textAlign: "right", color: "#f1f5f9", fontFamily: "var(--mono)" }}>${fp(tier.limitPrice)}</td>
+                                  <td style={{ padding: "3px 4px", textAlign: "right", color: "#64748b" }}>{tier.sweepDepthPct}%</td>
+                                  <td style={{ padding: "3px 4px", color: "#64748b", fontSize: 10 }}>{tier.capTier}</td>
+                                </tr>
+                              );
+                            })}
+                            <tr style={{ borderTop: "1px solid #1e293b" }}>
+                              <td style={{ padding: "3px 4px", color: "#f87171", fontSize: 10 }}>Stop</td>
+                              <td style={{ padding: "3px 4px", textAlign: "right", color: "#f87171", fontFamily: "var(--mono)" }}>${fp(analysis.sweepEstimate.suggestedStop)}</td>
+                              <td colSpan={2} style={{ padding: "3px 4px", color: "#64748b", fontSize: 10 }}>Below all tiers</td>
+                            </tr>
+                          </tbody>
+                        </table>
                       </div>
                     )}
 
